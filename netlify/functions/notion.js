@@ -1,4 +1,4 @@
-const TOKEN = process.env.VITE_NOTION_TOKEN
+const TOKEN = process.env.NOTION_TOKEN
 
 const DS = {
   risks:    '32cc7c4e-dba0-4b15-a963-9fabbb9ee4f5',
