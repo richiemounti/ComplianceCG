@@ -132,10 +132,24 @@ function DrilldownList({ title, items, meta }) {
     {!items.length ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>No matching records</p> : items.map((item, i) => (
       <div key={item.id || i} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '10px 0', borderBottom: i < items.length - 1 ? `1px solid ${C.border}` : 'none' }}>
         <div><div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 600 }}>{item.name}</div><div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 3 }}>{meta(item)}</div></div>
-        {item.url && <a href={item.url} target="_blank" rel="noreferrer" style={{ fontFamily: C.sg, fontSize: 10, fontWeight: 700, color: C.amber, whiteSpace: 'nowrap' }}>OPEN IN NOTION ↗</a>}
+        {item.url && <a href={item.url} target="_blank" rel="noreferrer" aria-label={`Open ${item.name} in Notion`} style={{ fontFamily: C.sg, fontSize: 16, fontWeight: 700, color: C.amber, whiteSpace: 'nowrap' }}>↗</a>}
       </div>
     ))}
   </SectionCard>
+}
+
+function ExpandableDomainRows({ risks }) {
+  const [domain, setDomain] = useState(null)
+  return Object.entries(risks.byDomain || {}).filter(([, value]) => value > 0).map(([name, value]) => {
+    const items = (risks.items || []).filter(item => item.domain === name)
+    const open = domain === name
+    return <div key={name} style={{ marginBottom: 10 }}>
+      <button onClick={() => setDomain(open ? null : name)} style={{ width: '100%', border: 0, background: 'none', padding: 0, cursor: 'pointer' }}><BarRow label={`${name} ${open ? '−' : '+'}`} value={value} max={risks.total} color={C.forest} /></button>
+      {open && <div style={{ margin: '2px 0 10px 12px', paddingLeft: 12, borderLeft: `2px solid ${C.amber}` }}>
+        {items.map(item => <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '6px 0', fontFamily: C.ws, fontSize: 11 }}><span>{item.name}</span>{item.url && <a href={item.url} target="_blank" rel="noreferrer" style={{ color: C.amber }}>↗</a>}</div>)}
+      </div>}
+    </div>
+  })
 }
 
 function RowItem({ name, meta, badge, badgeColor, last = false }) {
@@ -289,9 +303,7 @@ function OverviewTab({ risks, controls, tracker, loading, errors }) {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
         <SectionCard title="Risk Register — By Domain" sub={r.total ? `${r.total} total risks across all domains` : ' '}>
           {loading.risks ? <Spinner /> : errors.risks ? <ErrorMsg msg={errors.risks} /> :
-            Object.entries(r.byDomain || {}).filter(([,v]) => v > 0).map(([k, v]) =>
-              <BarRow key={k} label={k} value={v} max={r.total} color={C.forest} />
-            )
+            <ExpandableDomainRows risks={r} />
           }
         </SectionCard>
 
@@ -307,7 +319,7 @@ function OverviewTab({ risks, controls, tracker, loading, errors }) {
                       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flex: 1 }}>
                         <Dot color={sc} />
                         <div>
-                          <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text, lineHeight: 1.35 }}>{item.name}</div>
+                          <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text, lineHeight: 1.35 }}>{item.url ? <a href={item.url} target="_blank" rel="noreferrer" style={{ textDecoration: 'none' }}>{item.name} <span style={{ color: C.amber }}>↗</span></a> : item.name}</div>
                           <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{item.dueDate} · {item.owner}</div>
                         </div>
                       </div>
