@@ -111,9 +111,9 @@ function SectionCard({ title, sub, children, style = {} }) {
   )
 }
 
-function KpiCard({ label, value, sub, badge, badgeColor, topColor = C.amber, loading, error }) {
+function KpiCard({ label, value, sub, badge, badgeColor, topColor = C.amber, loading, error, onClick }) {
   return (
-    <div style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 4, padding: '20px 22px', position: 'relative', overflow: 'hidden', animation: 'fadeUp 0.4s ease both' }}>
+    <button onClick={onClick} disabled={!onClick} style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 4, padding: '20px 22px', position: 'relative', overflow: 'hidden', animation: 'fadeUp 0.4s ease both', textAlign: 'left', cursor: onClick ? 'pointer' : 'default', font: 'inherit', width: '100%' }}>
       <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: topColor }} />
       <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.textDim, marginBottom: 7 }}>{label}</div>
       {loading ? <Spinner /> : error ? <ErrorMsg msg={error} /> : (
@@ -123,8 +123,19 @@ function KpiCard({ label, value, sub, badge, badgeColor, topColor = C.amber, loa
           {badge && <div style={{ marginTop: 8 }}><Badge label={badge} color={badgeColor || topColor} /></div>}
         </>
       )}
-    </div>
+    </button>
   )
+}
+
+function DrilldownList({ title, items, meta }) {
+  return <SectionCard title={title} sub="Click Open in Notion to edit the source record" style={{ marginBottom: 16 }}>
+    {!items.length ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>No matching records</p> : items.map((item, i) => (
+      <div key={item.id || i} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '10px 0', borderBottom: i < items.length - 1 ? `1px solid ${C.border}` : 'none' }}>
+        <div><div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 600 }}>{item.name}</div><div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 3 }}>{meta(item)}</div></div>
+        {item.url && <a href={item.url} target="_blank" rel="noreferrer" style={{ fontFamily: C.sg, fontSize: 10, fontWeight: 700, color: C.amber, whiteSpace: 'nowrap' }}>OPEN IN NOTION ↗</a>}
+      </div>
+    ))}
+  </SectionCard>
 }
 
 function RowItem({ name, meta, badge, badgeColor, last = false }) {
@@ -205,6 +216,7 @@ function OverviewTab({ risks, controls, tracker, loading, errors }) {
   const r = risks || {}
   const c = controls || {}
   const t = tracker || {}
+  const [drilldown, setDrilldown] = useState(null)
 
   const highN        = r.byProbability?.High ?? 0
   const openN        = r.byCategory?.Open ?? 0
@@ -230,8 +242,8 @@ function OverviewTab({ risks, controls, tracker, loading, errors }) {
           topColor={highN > 0 ? C.coral : C.positive}
           badge={highN > 0 ? 'Action needed' : 'Under control'}
           badgeColor={highN > 0 ? C.coral : C.positive}
-          loading={loading.risks} error={errors.risks} />
-        <KpiCard label="Open Risks" value={openN} sub="Awaiting mitigation" topColor={C.amber} loading={loading.risks} error={errors.risks} />
+          loading={loading.risks} error={errors.risks} onClick={() => setDrilldown(drilldown === 'high' ? null : 'high')} />
+        <KpiCard label="Open Risks" value={openN} sub="Awaiting mitigation" topColor={C.amber} loading={loading.risks} error={errors.risks} onClick={() => setDrilldown(drilldown === 'open' ? null : 'open')} />
         <KpiCard label="Controls Active" value={c.total ? `${controlPct}%` : null} sub={c.total ? `${inActiveN} of ${c.total} controls` : ''}
           topColor={controlPct >= 80 ? C.positive : controlPct >= 50 ? C.amber : C.coral}
           badge={controlPct >= 80 ? 'Strong coverage' : controlPct >= 50 ? 'Partial coverage' : 'Gaps present'}
@@ -239,13 +251,17 @@ function OverviewTab({ risks, controls, tracker, loading, errors }) {
           loading={loading.controls} error={errors.controls} />
         <KpiCard label="Activities Done" value={t.total ? `${completionPct}%` : null} sub={t.total ? `${doneN} of ${denom} activities` : ''}
           topColor={completionPct >= 70 ? C.positive : completionPct >= 40 ? C.amber : C.coral}
-          loading={loading.tracker} error={errors.tracker} />
+          loading={loading.tracker} error={errors.tracker} onClick={() => setDrilldown(drilldown === 'done' ? null : 'done')} />
         <KpiCard label="Overdue" value={overdueN} sub="Past due date"
           topColor={overdueN > 0 ? C.coral : C.positive}
           badge={overdueN > 0 ? 'Action needed' : 'All on track'}
           badgeColor={overdueN > 0 ? C.coral : C.positive}
           loading={loading.tracker} error={errors.tracker} />
       </div>
+
+      {drilldown === 'high' && <DrilldownList title="High Probability Risks" items={(r.items || []).filter(item => item.probability === 'High')} meta={item => `${item.domain || '—'} · ${item.controlStatus || '—'}`} />}
+      {drilldown === 'open' && <DrilldownList title="Open Risks" items={(r.items || []).filter(item => item.category === 'Open')} meta={item => `${item.probability || '—'} · ${item.domain || '—'}`} />}
+      {drilldown === 'done' && <DrilldownList title="Completed Activities" items={(t.items || []).filter(item => item.status === 'Done')} meta={item => `${item.type || 'Activity'} · ${item.owner || 'Unassigned'} · Done`} />}
 
       {/* Safeguarding status strip */}
       <div style={{ marginBottom: 16 }}>
