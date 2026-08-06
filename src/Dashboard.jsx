@@ -289,7 +289,7 @@ function OverviewTab({ risks, controls, tracker, loading, errors }) {
         <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 10 }}>SAFEGUARDING STATUS</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
           {[
-            { label: 'SFP Appointed', value: 'Pending', sub: 'Sumaiya Karim — in progress', color: C.coral },
+            { label: 'SFP Appointed', value: 'Appointed', sub: 'Sumaiya Karim', color: C.positive },
             { label: 'Incidents YTD', value: '0 reported', sub: `Jan – ${new Date().toLocaleDateString('en-GB',{month:'short'})} ${new Date().getFullYear()}`, color: C.positive },
             { label: 'Code of Conduct', value: 'Not verified', sub: 'Sign-off status unconfirmed', color: C.amber },
             { label: 'Mandatory Training', value: 'Not verified', sub: 'Completion rate unknown', color: C.amber },
@@ -540,7 +540,7 @@ function SafeguardingTab({ risks, loading, errors }) {
       <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 10 }}>GOVERNANCE STATUS</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
         {[
-          { label: 'Safeguarding Focal Person', value: 'Sumaiya Karim', sub: 'Appointment in progress', topColor: C.coral, badge: 'Pending formal appointment', badgeColor: C.coral },
+          { label: 'Safeguarding Focal Person', value: 'Sumaiya Karim', sub: 'Appointed safeguarding focal person', topColor: C.positive, badge: 'Active', badgeColor: C.positive },
           { label: 'Incidents This Year', value: '0', sub: `Jan – ${new Date().toLocaleDateString('en-GB',{month:'short',year:'numeric'})} · No reports`, topColor: C.positive, badge: 'All clear', badgeColor: C.positive },
           { label: 'Code of Conduct Sign-off', value: 'Not verified', sub: 'Status unconfirmed across team', topColor: C.amber, badge: 'Action: confirm with Sumaiya', badgeColor: C.amber },
           { label: 'Mandatory Training', value: 'Not verified', sub: 'Completion rate unknown', topColor: C.amber, badge: 'Action: confirm with Sumaiya', badgeColor: C.amber },
@@ -593,7 +593,7 @@ function SafeguardingTab({ risks, loading, errors }) {
 
           <SectionCard title="Key Contacts" sub="Safeguarding escalation chain">
             {[
-              { name: 'Safeguarding Focal Person', meta: 'Sumaiya Karim · appointment in progress', badge: 'Pending', color: C.coral },
+              { name: 'Safeguarding Focal Person', meta: 'Sumaiya Karim', badge: 'Active', color: C.positive },
               { name: 'Director (escalation)', meta: 'Dr Kate McAlpine · kate@connectgo.co.uk', badge: 'Active', color: C.positive },
               { name: 'DPO (data safeguarding)', meta: 'Belinda Mziray · belinda@connectgo.co.uk', badge: 'Active', color: C.positive },
             ].map((c, i, arr) => (
