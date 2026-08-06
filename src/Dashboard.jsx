@@ -49,6 +49,12 @@ async function fetchTracker() {
   return res.json()
 }
 
+async function fetchDb(db) {
+  const res = await fetch(`/.netlify/functions/notion?db=${db}`)
+  if (!res.ok) throw new Error(`API error ${res.status}`)
+  return res.json()
+}
+
 // ── Shared UI primitives ─────────────────────────────────────────
 
 function Spinner() {
@@ -151,6 +157,20 @@ function DonutRing({ pct, color, size = 100 }) {
       </div>
     </div>
   )
+}
+
+function RegisterTab({ title, sub, data, loading, error, owner, fields }) {
+  const items = (data?.items || []).filter(item => owner === 'All people' || item.owner === owner)
+  if (loading) return <SectionCard title={title}><Spinner /></SectionCard>
+  if (error) return <SectionCard title={title}><ErrorMsg msg={error} /></SectionCard>
+  return <SectionCard title={title} sub={sub}>
+    {!items.length ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>No matching records</p> : items.map((item, i) => (
+      <a key={item.id} href={item.url} target="_blank" rel="noreferrer" style={{ display: 'grid', gridTemplateColumns: `minmax(220px, 2fr) repeat(${fields.length - 1}, minmax(100px, 1fr))`, gap: 12, padding: '11px 0', borderBottom: i < items.length - 1 ? `1px solid ${C.border}` : 'none', textDecoration: 'none' }}>
+        <span style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 600, color: C.text }}>{item.name} ↗</span>
+        {fields.slice(1).map(field => <span key={field} style={{ fontFamily: C.ws, fontSize: 11, color: C.textMid }}>{item[field] || '—'}</span>)}
+      </a>
+    ))}
+  </SectionCard>
 }
 
 // ── Tab panels ───────────────────────────────────────────────────
@@ -552,6 +572,9 @@ const TABS = [
   { id: 'controls',      label: 'Controls' },
   { id: 'rhythm',        label: 'Compliance Rhythm' },
   { id: 'safeguarding',  label: 'Safeguarding' },
+  { id: 'documents',     label: 'Document Library' },
+  { id: 'ropa',          label: 'RoPA' },
+  { id: 'tools',         label: 'IT Tools' },
 ]
 
 export default function Dashboard() {
@@ -559,6 +582,10 @@ export default function Dashboard() {
   const [risks, setRisks]       = useState(null)
   const [controls, setControls] = useState(null)
   const [tracker, setTracker]   = useState(null)
+  const [documents, setDocuments] = useState(null)
+  const [ropa, setRopa] = useState(null)
+  const [tools, setTools] = useState(null)
+  const [owner, setOwner] = useState('All people')
   const [loading, setLoading]   = useState({ risks: true, controls: true, tracker: true })
   const [errors, setErrors]     = useState({})
   const [lastSync, setLastSync] = useState(null)
@@ -566,7 +593,7 @@ export default function Dashboard() {
 
   const load = useCallback(async () => {
     setSyncing(true)
-    setLoading({ risks: true, controls: true, tracker: true })
+    setLoading({ risks: true, controls: true, tracker: true, documents: true, ropa: true, tools: true })
     setErrors({})
     const run = async (key, fn, set) => {
       try { set(await fn()) }
@@ -577,6 +604,9 @@ export default function Dashboard() {
       run('risks',    fetchRisks,    setRisks),
       run('controls', fetchControls, setControls),
       run('tracker',  fetchTracker,  setTracker),
+      run('documents', () => fetchDb('documents'), setDocuments),
+      run('ropa', () => fetchDb('ropa'), setRopa),
+      run('tools', () => fetchDb('tools'), setTools),
     ])
     setLastSync(new Date())
     setSyncing(false)
@@ -607,6 +637,13 @@ export default function Dashboard() {
                 LAST SYNC: {lastSync.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
               </span>
             )}
+            <select aria-label="Filter by owner" value={owner} onChange={e => setOwner(e.target.value)} style={{ background: C.forest, border: `1px solid ${C.yellow}`, borderRadius: 3, padding: '7px 9px', fontFamily: C.sg, fontSize: 10, color: C.yellow }}>
+              <option>All people</option>
+              <option>Belinda Mziray</option>
+              <option>Kate McAlpine</option>
+              <option>Sumaiya Karim</option>
+              <option>Samuel Mounsey</option>
+            </select>
             <button onClick={load} disabled={syncing} style={{
               background: syncing ? 'rgba(255,255,255,0.06)' : `${C.yellow}22`,
               border: `1px solid ${syncing ? 'rgba(255,255,255,0.12)' : C.yellow}`,
@@ -648,6 +685,9 @@ export default function Dashboard() {
         {tab === 'controls'     && <ControlsTab     controls={controls} loading={loading} errors={errors} />}
         {tab === 'rhythm'       && <RhythmTab       tracker={tracker} loading={loading} errors={errors} />}
         {tab === 'safeguarding' && <SafeguardingTab risks={risks} loading={loading} errors={errors} />}
+        {tab === 'documents' && <RegisterTab title="Document Library" sub="In review, approved and upcoming review dates" data={documents} loading={loading.documents} error={errors.documents} owner={owner} fields={['name', 'domain', 'status', 'nextReviewDate']} />}
+        {tab === 'ropa' && <RegisterTab title="Register of Processing Activities" sub="Processing, DPIA and retention oversight" data={ropa} loading={loading.ropa} error={errors.ropa} owner={owner} fields={['name', 'businessFunction', 'dpiaProgress', 'lastRetentionReviewDate']} />}
+        {tab === 'tools' && <RegisterTab title="IT Tools & Access Matrix" sub="MFA, personal-data and renewal oversight" data={tools} loading={loading.tools} error={errors.tools} owner={owner} fields={['name', 'toolStatus', 'mfaStatus', 'nextRenewalDate']} />}
       </div>
 
       {/* Footer */}
