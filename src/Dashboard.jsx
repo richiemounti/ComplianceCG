@@ -160,7 +160,9 @@ function DonutRing({ pct, color, size = 100 }) {
 }
 
 function RegisterTab({ title, sub, data, loading, error, owner, fields }) {
-  const items = (data?.items || []).filter(item => owner === 'All people' || item.owner === owner)
+  // RoPA and some IT-tool records do not have a person owner. Keep those
+  // visible when filtering rather than incorrectly showing an empty register.
+  const items = (data?.items || []).filter(item => owner === 'All people' || !item.owner || item.owner.includes(owner))
   if (loading) return <SectionCard title={title}><Spinner /></SectionCard>
   if (error) return <SectionCard title={title}><ErrorMsg msg={error} /></SectionCard>
   return <SectionCard title={title} sub={sub}>
@@ -171,6 +173,20 @@ function RegisterTab({ title, sub, data, loading, error, owner, fields }) {
       </a>
     ))}
   </SectionCard>
+}
+
+function RegisterProgress({ title, items, definitions }) {
+  const total = items?.length || 0
+  return <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(165px, 1fr))', gap: 12, marginBottom: 14 }}>
+    {definitions.map(({ label, test, color }) => {
+      const count = (items || []).filter(test).length
+      return <div key={label} style={{ background: C.white, border: `1px solid ${C.border}`, borderTop: `3px solid ${color}`, borderRadius: 4, padding: '15px 17px' }}>
+        <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', color: C.textDim }}>{label}</div>
+        <div style={{ fontFamily: C.sg, fontSize: 25, fontWeight: 700, color: C.text, margin: '7px 0 3px' }}>{count}</div>
+        <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim }}>{total} total records</div>
+      </div>
+    })}
+  </div>
 }
 
 // ── Tab panels ───────────────────────────────────────────────────
@@ -682,12 +698,14 @@ export default function Dashboard() {
       <div style={{ maxWidth: 1400, margin: '0 auto', padding: '14px 40px 52px' }}>
         {tab === 'overview'     && <OverviewTab     risks={risks} controls={controls} tracker={tracker} loading={loading} errors={errors} />}
         {tab === 'risks'        && <RisksTab        risks={risks} loading={loading} errors={errors} />}
+        {tab === 'risks'        && <div style={{ marginTop: 14 }}><RegisterTab title="Risk Register — Records" sub="Click a risk to open and edit it in Notion" data={risks} loading={loading.risks} error={errors.risks} owner={owner} fields={['name', 'owner', 'probability', 'controlStatus']} /></div>}
         {tab === 'controls'     && <ControlsTab     controls={controls} loading={loading} errors={errors} />}
+        {tab === 'controls'     && <div style={{ marginTop: 14 }}><RegisterTab title="Controls — Records" sub="Click a control to open and edit it in Notion" data={controls} loading={loading.controls} error={errors.controls} owner={owner} fields={['name', 'owner', 'status', 'reviewDate']} /></div>}
         {tab === 'rhythm'       && <RhythmTab       tracker={tracker} loading={loading} errors={errors} />}
         {tab === 'safeguarding' && <SafeguardingTab risks={risks} loading={loading} errors={errors} />}
         {tab === 'documents' && <RegisterTab title="Document Library" sub="In review, approved and upcoming review dates" data={documents} loading={loading.documents} error={errors.documents} owner={owner} fields={['name', 'domain', 'status', 'nextReviewDate']} />}
-        {tab === 'ropa' && <RegisterTab title="Register of Processing Activities" sub="Processing, DPIA and retention oversight" data={ropa} loading={loading.ropa} error={errors.ropa} owner={owner} fields={['name', 'businessFunction', 'dpiaProgress', 'lastRetentionReviewDate']} />}
-        {tab === 'tools' && <RegisterTab title="IT Tools & Access Matrix" sub="MFA, personal-data and renewal oversight" data={tools} loading={loading.tools} error={errors.tools} owner={owner} fields={['name', 'toolStatus', 'mfaStatus', 'nextRenewalDate']} />}
+        {tab === 'ropa' && <><RegisterProgress title="RoPA progress" items={ropa?.items} definitions={[{ label: 'DPIA REQUIRED', test: x => x.dpiaProgress && x.dpiaProgress !== 'N/A', color: C.coral }, { label: 'RETENTION REVIEW', test: x => !x.lastRetentionReviewDate, color: C.amber }, { label: 'ACTIVITIES', test: () => true, color: C.forest }]} /><RegisterTab title="Register of Processing Activities" sub="Business function, DPIA progress and retention review — click a record to edit in Notion" data={ropa} loading={loading.ropa} error={errors.ropa} owner={owner} fields={['name', 'businessFunction', 'dpiaProgress', 'lastRetentionReviewDate']} /></>}
+        {tab === 'tools' && <><RegisterProgress title="IT tools progress" items={tools?.items} definitions={[{ label: 'MFA NOT CONFIRMED', test: x => x.mfaStatus !== 'Enabled', color: C.coral }, { label: 'REVIEW REQUIRED', test: x => x.toolStatus !== 'Active', color: C.amber }, { label: 'TOOLS REGISTERED', test: () => true, color: C.forest }]} /><RegisterTab title="IT Tools & Access Matrix" sub="Tool status, MFA and renewal date — click a record to edit in Notion" data={tools} loading={loading.tools} error={errors.tools} owner={owner} fields={['name', 'toolStatus', 'mfaStatus', 'nextRenewalDate']} /></>}
       </div>
 
       {/* Footer */}
