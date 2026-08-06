@@ -189,6 +189,16 @@ function RegisterProgress({ title, items, definitions }) {
   </div>
 }
 
+function countValues(items, key, defaults) {
+  const result = { ...defaults }
+  for (const item of items) if (item[key] && item[key] in result) result[item[key]]++
+  return result
+}
+
+function matchesOwner(item, owner) {
+  return owner === 'All people' || !item.owner || item.owner.includes(owner)
+}
+
 // ── Tab panels ───────────────────────────────────────────────────
 
 function OverviewTab({ risks, controls, tracker, loading, errors }) {
@@ -630,6 +640,23 @@ export default function Dashboard() {
 
   useEffect(() => { load() }, [load])
 
+  const filterRegister = (register, summaries) => {
+    if (!register?.items || owner === 'All people') return register
+    const items = register.items.filter(item => matchesOwner(item, owner))
+    return { ...register, total: items.length, items, ...Object.fromEntries(summaries.map(([name, key, defaults]) => [name, countValues(items, key, defaults)])) }
+  }
+  const visibleRisks = filterRegister(risks, [
+    ['byProbability', 'probability', { High: 0, Medium: 0, Low: 0 }],
+    ['byDomain', 'domain', { 'Data Protection': 0, Safeguarding: 0, Commercial: 0, Operational: 0, Regulatory: 0, Reputational: 0 }],
+    ['byControlStatus', 'controlStatus', { 'In Place': 0, Partial: 0, 'Not In Place': 0, 'Not Applicable': 0 }],
+    ['byCategory', 'category', { Open: 0, Addressed: 0, Closed: 0 }],
+  ])
+  const visibleControls = filterRegister(controls, [
+    ['byStatus', 'status', { Active: 0, Partial: 0, Planned: 0, 'Not In Place': 0 }],
+    ['byDomain', 'domain', { 'Data Protection': 0, Safeguarding: 0, Commercial: 0 }],
+  ])
+  const visibleTracker = filterRegister(tracker, [['byStatus', 'status', { Done: 0, 'In Progress': 0, 'To Do': 0, Overdue: 0, Skipped: 0 }]])
+  if (visibleTracker?.items) visibleTracker.upcoming = visibleTracker.items.filter(item => item.dueDate && !['Done', 'Skipped'].includes(item.status)).sort((a, b) => a.dueDate.localeCompare(b.dueDate)).slice(0, 5)
   const currentTab = TABS.find(t => t.id === tab)
 
   return (
@@ -696,12 +723,12 @@ export default function Dashboard() {
 
       {/* Content */}
       <div style={{ maxWidth: 1400, margin: '0 auto', padding: '14px 40px 52px' }}>
-        {tab === 'overview'     && <OverviewTab     risks={risks} controls={controls} tracker={tracker} loading={loading} errors={errors} />}
-        {tab === 'risks'        && <RisksTab        risks={risks} loading={loading} errors={errors} />}
+        {tab === 'overview'     && <OverviewTab     risks={visibleRisks} controls={visibleControls} tracker={visibleTracker} loading={loading} errors={errors} />}
+        {tab === 'risks'        && <RisksTab        risks={visibleRisks} loading={loading} errors={errors} />}
         {tab === 'risks'        && <div style={{ marginTop: 14 }}><RegisterTab title="Risk Register — Records" sub="Click a risk to open and edit it in Notion" data={risks} loading={loading.risks} error={errors.risks} owner={owner} fields={['name', 'owner', 'probability', 'controlStatus']} /></div>}
-        {tab === 'controls'     && <ControlsTab     controls={controls} loading={loading} errors={errors} />}
+        {tab === 'controls'     && <ControlsTab     controls={visibleControls} loading={loading} errors={errors} />}
         {tab === 'controls'     && <div style={{ marginTop: 14 }}><RegisterTab title="Controls — Records" sub="Click a control to open and edit it in Notion" data={controls} loading={loading.controls} error={errors.controls} owner={owner} fields={['name', 'owner', 'status', 'reviewDate']} /></div>}
-        {tab === 'rhythm'       && <RhythmTab       tracker={tracker} loading={loading} errors={errors} />}
+        {tab === 'rhythm'       && <RhythmTab       tracker={visibleTracker} loading={loading} errors={errors} />}
         {tab === 'safeguarding' && <SafeguardingTab risks={risks} loading={loading} errors={errors} />}
         {tab === 'documents' && <RegisterTab title="Document Library" sub="In review, approved and upcoming review dates" data={documents} loading={loading.documents} error={errors.documents} owner={owner} fields={['name', 'domain', 'status', 'nextReviewDate']} />}
         {tab === 'ropa' && <><RegisterProgress title="RoPA progress" items={ropa?.items} definitions={[{ label: 'DPIA REQUIRED', test: x => x.dpiaProgress && x.dpiaProgress !== 'N/A', color: C.coral }, { label: 'RETENTION REVIEW', test: x => !x.lastRetentionReviewDate, color: C.amber }, { label: 'ACTIVITIES', test: () => true, color: C.forest }]} /><RegisterTab title="Register of Processing Activities" sub="Business function, DPIA progress and retention review — click a record to edit in Notion" data={ropa} loading={loading.ropa} error={errors.ropa} owner={owner} fields={['name', 'businessFunction', 'dpiaProgress', 'lastRetentionReviewDate']} /></>}
