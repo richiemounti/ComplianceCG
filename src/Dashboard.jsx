@@ -184,19 +184,26 @@ function DonutRing({ pct, color, size = 100 }) {
   )
 }
 
-function RegisterTab({ title, sub, data, loading, error, owner, fields }) {
+function RegisterTab({ title, sub, data, loading, error, owner, fields, groupBy }) {
   // RoPA and some IT-tool records do not have a person owner. Keep those
   // visible when filtering rather than incorrectly showing an empty register.
   const items = (data?.items || []).filter(item => owner === 'All people' || !item.owner || item.owner.includes(owner))
+  const labels = { name: 'Risk Name', owner: 'Risk Owner', probability: 'Probability', controlStatus: 'Control Status', domain: 'Domain', status: 'Status', type: 'Type', reviewDate: 'Review Date', nextReviewDate: 'Next Review Date', businessFunction: 'Business Function', dpiaProgress: 'DPIA Progress', lastRetentionReviewDate: 'Last Retention Review Date', toolStatus: 'Tool Status', mfaStatus: '2FA/MFA Status', nextRenewalDate: 'Next Renewal Date' }
+  const [page, setPage] = useState(0)
+  const [expandedGroup, setExpandedGroup] = useState(null)
+  const pageSize = 10
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize))
+  const shown = items.slice(page * pageSize, (page + 1) * pageSize)
   if (loading) return <SectionCard title={title}><Spinner /></SectionCard>
   if (error) return <SectionCard title={title}><ErrorMsg msg={error} /></SectionCard>
   return <SectionCard title={title} sub={sub}>
-    {!items.length ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>No matching records</p> : items.map((item, i) => (
-      <a key={item.id} href={item.url} target="_blank" rel="noreferrer" style={{ display: 'grid', gridTemplateColumns: `minmax(220px, 2fr) repeat(${fields.length - 1}, minmax(100px, 1fr))`, gap: 12, padding: '11px 0', borderBottom: i < items.length - 1 ? `1px solid ${C.border}` : 'none', textDecoration: 'none' }}>
+    {groupBy && <div style={{ marginBottom: 16 }}>{Object.entries(items.reduce((groups, item) => { const key = item[groupBy] || 'Uncategorised'; (groups[key] ||= []).push(item); return groups }, {})).map(([name, grouped]) => <div key={name} style={{ borderBottom: `1px solid ${C.border}`, padding: '7px 0' }}><button onClick={() => setExpandedGroup(expandedGroup === name ? null : name)} style={{ border: 0, background: 'none', cursor: 'pointer', fontFamily: C.ws, fontSize: 12, color: C.text }}>{expandedGroup === name ? '−' : '+'} {name} <strong style={{ marginLeft: 8 }}>{grouped.length}</strong></button>{expandedGroup === name && grouped.map(item => <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', margin: '7px 0 2px 20px', fontFamily: C.ws, fontSize: 11 }}><span>{item.name}</span><a href={item.url} target="_blank" rel="noreferrer" style={{ color: C.amber }}>↗</a></div>)}</div>)}</div>}
+    {!items.length ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>No matching records</p> : <><div style={{ overflowX: 'auto' }}><div style={{ display: 'grid', gridTemplateColumns: `minmax(220px, 2fr) repeat(${fields.length - 1}, minmax(100px, 1fr))`, gap: 12, minWidth: 650, paddingBottom: 8, borderBottom: `1px solid ${C.border}` }}>{fields.map(field => <span key={field} style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.1em', color: C.textDim }}>{labels[field] || field}</span>)}</div>{shown.map((item, i) => (
+      <a key={item.id} href={item.url} target="_blank" rel="noreferrer" style={{ display: 'grid', gridTemplateColumns: `minmax(220px, 2fr) repeat(${fields.length - 1}, minmax(100px, 1fr))`, gap: 12, minWidth: 650, padding: '11px 0', borderBottom: i < items.length - 1 ? `1px solid ${C.border}` : 'none', textDecoration: 'none' }}>
         <span style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 600, color: C.text }}>{item.name} ↗</span>
         {fields.slice(1).map(field => <span key={field} style={{ fontFamily: C.ws, fontSize: 11, color: C.textMid }}>{item[field] || '—'}</span>)}
       </a>
-    ))}
+    ))}</div><div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 10, marginTop: 12 }}><button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0} style={{ border: 0, background: 'none', color: C.amber, fontFamily: C.sg, fontSize: 10, cursor: page === 0 ? 'default' : 'pointer' }}>← PREVIOUS</button><span style={{ fontFamily: C.sg, fontSize: 10, color: C.textDim }}>{page + 1} / {pageCount}</span><button onClick={() => setPage(Math.min(pageCount - 1, page + 1))} disabled={page === pageCount - 1} style={{ border: 0, background: 'none', color: C.amber, fontFamily: C.sg, fontSize: 10, cursor: page === pageCount - 1 ? 'default' : 'pointer' }}>NEXT →</button></div></>}
   </SectionCard>
 }
 
@@ -759,7 +766,7 @@ export default function Dashboard() {
         {tab === 'rhythm'       && <RhythmTab       tracker={visibleTracker} loading={loading} errors={errors} />}
         {tab === 'safeguarding' && <SafeguardingTab risks={risks} loading={loading} errors={errors} />}
         {tab === 'documents' && <RegisterTab title="Document Library" sub="In review, approved and upcoming review dates" data={documents} loading={loading.documents} error={errors.documents} owner={owner} fields={['name', 'domain', 'status', 'nextReviewDate']} />}
-        {tab === 'ropa' && <><RegisterProgress title="RoPA progress" items={ropa?.items} definitions={[{ label: 'DPIA REQUIRED', test: x => x.dpiaProgress && x.dpiaProgress !== 'N/A', color: C.coral }, { label: 'RETENTION REVIEW', test: x => !x.lastRetentionReviewDate, color: C.amber }, { label: 'ACTIVITIES', test: () => true, color: C.forest }]} /><RegisterTab title="Register of Processing Activities" sub="Business function, DPIA progress and retention review — click a record to edit in Notion" data={ropa} loading={loading.ropa} error={errors.ropa} owner={owner} fields={['name', 'businessFunction', 'dpiaProgress', 'lastRetentionReviewDate']} /></>}
+        {tab === 'ropa' && <><RegisterProgress title="RoPA progress" items={ropa?.items} definitions={[{ label: 'DPIA REQUIRED', test: x => x.dpiaProgress && x.dpiaProgress !== 'N/A', color: C.coral }, { label: 'RETENTION REVIEW', test: x => !x.lastRetentionReviewDate, color: C.amber }, { label: 'ACTIVITIES', test: () => true, color: C.forest }]} /><RegisterTab title="Register of Processing Activities" sub="Business function, DPIA progress and retention review — click a record to edit in Notion" data={ropa} loading={loading.ropa} error={errors.ropa} owner={owner} fields={['name', 'businessFunction', 'dpiaProgress', 'lastRetentionReviewDate']} groupBy="businessFunction" /></>}
         {tab === 'tools' && <><RegisterProgress title="IT tools progress" items={tools?.items} definitions={[{ label: 'MFA NOT CONFIRMED', test: x => x.mfaStatus !== 'Enabled', color: C.coral }, { label: 'REVIEW REQUIRED', test: x => x.toolStatus !== 'Active', color: C.amber }, { label: 'TOOLS REGISTERED', test: () => true, color: C.forest }]} /><RegisterTab title="IT Tools & Access Matrix" sub="Tool status, MFA and renewal date — click a record to edit in Notion" data={tools} loading={loading.tools} error={errors.tools} owner={owner} fields={['name', 'toolStatus', 'mfaStatus', 'nextRenewalDate']} /></>}
       </div>
 
