@@ -22,7 +22,10 @@ const statusTone = v =>
   ['Done','Active','Approved','Closed','In Place','Enabled'].includes(v) ? 'good'
   : ['High','Overdue','Not In Place','Not in place','Pending'].includes(v) ? 'critical'
   : 'attention'
-const displayName = name => name.replace(/^dr\s+/i,'').trim()
+const displayName = name => {
+  const cleaned = name.replace(/^dr\s+/i,'').trim()
+  return /^sumaiya(?:\s|$)/i.test(cleaned) ? 'Sumaiya' : cleaned
+}
 const normaliseName = name => displayName(name).toLowerCase()
 const dedupeNames = names => {
   const seen = new Map()
