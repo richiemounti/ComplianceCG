@@ -1,784 +1,183 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
-// ── Config ───────────────────────────────────────────────────────
+const get = key => fetch(`/.netlify/functions/notion?db=${key}`).then(async response => {
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || `API error ${response.status}`)
+  return data
+})
 
-// ── Brand tokens ─────────────────────────────────────────────────
-const C = {
-  forest:   '#11302A',
-  amber:    '#CD8028',
-  yellow:   '#F0C71D',
-  coral:    '#EE5C5F',
-  olive:    '#858755',
-  burgundy: '#511433',
-  cream:    '#F5F2EC',
-  white:    '#FFFFFF',
-  positive: '#2d8a4e',
-  border:   'rgba(17,48,42,0.09)',
-  text:     '#11302A',
-  textMid:  'rgba(17,48,42,0.6)',
-  textDim:  'rgba(17,48,42,0.38)',
-  sg:       "'Space Grotesk', sans-serif",
-  ws:       "'Work Sans', sans-serif",
+const formatDate = value => value ? new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(`${value}T00:00:00`)) : '—'
+const count = (items, property, values) => values.reduce((result, value) => ({ ...result, [value]: items.filter(item => item[property] === value).length }), {})
+const statusTone = value => ['Done', 'Active', 'Approved', 'Closed', 'In Place', 'Enabled'].includes(value) ? 'good' : ['High', 'Overdue', 'Not In Place', 'Not in place', 'Pending'].includes(value) ? 'critical' : 'attention'
+
+function Badge({ children }) {
+  return <span className={`badge ${statusTone(children)}`}>{children || '—'}</span>
 }
 
-// ── Global styles injected once ──────────────────────────────────
-const GLOBAL_CSS = `
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body, #root { background: ${C.cream}; min-height: 100vh; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @keyframes fadeUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
-  a { color: inherit; }
-`
-
-// ── API helpers ──────────────────────────────────────────────────
-async function fetchRisks() {
-  const res = await fetch('/.netlify/functions/notion?db=risks')
-  if (!res.ok) throw new Error(`API error ${res.status}`)
-  return res.json()
+function NotionLink({ item, children }) {
+  return <a className="notion-link" href={item.url} target="_blank" rel="noreferrer">{children}<span aria-hidden="true">↗</span></a>
 }
 
-async function fetchControls() {
-  const res = await fetch('/.netlify/functions/notion?db=controls')
-  if (!res.ok) throw new Error(`API error ${res.status}`)
-  return res.json()
+function Panel({ title, source, children }) {
+  return <section className="panel"><header className="panel-heading"><h2>{title}</h2>{source && <span>{source}</span>}</header>{children}</section>
 }
 
-async function fetchTracker() {
-  const res = await fetch('/.netlify/functions/notion?db=tracker')
-  if (!res.ok) throw new Error(`API error ${res.status}`)
-  return res.json()
+function MetricBand({ metrics }) {
+  return <section className="metric-band" aria-label="Key indicators">{metrics.map(metric => <button type="button" key={metric.label} onClick={metric.onClick}><span>{metric.label}</span><strong className={metric.tone || ''}>{metric.value}</strong></button>)}</section>
 }
 
-async function fetchDb(db) {
-  const res = await fetch(`/.netlify/functions/notion?db=${db}`)
-  if (!res.ok) throw new Error(`API error ${res.status}`)
-  return res.json()
+function FilterBar({ options, value, onChange }) {
+  return <div className="filter-bar">{options.map(([filter, label]) => <button key={filter} type="button" className={value === filter ? 'selected' : ''} onClick={() => onChange(filter)}>{label}</button>)}</div>
 }
 
-// ── Shared UI primitives ─────────────────────────────────────────
-
-function Spinner() {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '14px 0' }}>
-      <div style={{ width: 14, height: 14, borderRadius: '50%', border: `2px solid ${C.border}`, borderTopColor: C.amber, animation: 'spin 0.7s linear infinite', flexShrink: 0 }} />
-      <span style={{ fontFamily: C.ws, fontSize: 11, color: C.textDim }}>Loading from Notion…</span>
-    </div>
-  )
-}
-
-function ErrorMsg({ msg }) {
-  return (
-    <div style={{ background: `${C.coral}10`, border: `1px solid ${C.coral}30`, borderRadius: 4, padding: '10px 12px', fontFamily: C.ws, fontSize: 11, color: C.coral }}>
-      {msg}
-    </div>
-  )
-}
-
-function Badge({ label, color = C.amber }) {
-  return (
-    <span style={{ display: 'inline-block', fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', padding: '3px 7px', borderRadius: 3, background: `${color}18`, color, whiteSpace: 'nowrap' }}>
-      {label}
-    </span>
-  )
-}
-
-function Dot({ color, size = 6 }) {
-  return <div style={{ width: size, height: size, borderRadius: '50%', background: color, flexShrink: 0, marginTop: size === 6 ? 3 : 0 }} />
-}
-
-function BarRow({ label, value, max, color = C.amber }) {
-  const pct = max > 0 ? Math.min((value / max) * 100, 100) : 0
-  return (
-    <div style={{ marginBottom: 10 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-        <span style={{ fontFamily: C.ws, fontSize: 12, color: C.textMid }}>{label}</span>
-        <span style={{ fontFamily: C.sg, fontSize: 12, fontWeight: 600, color: C.text }}>{value}</span>
-      </div>
-      <div style={{ height: 3, background: 'rgba(17,48,42,0.07)', borderRadius: 2 }}>
-        <div style={{ height: 3, width: `${pct}%`, background: color, borderRadius: 2, transition: 'width 1s ease' }} />
-      </div>
-    </div>
-  )
-}
-
-function SectionCard({ title, sub, children, style = {} }) {
-  return (
-    <div style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 4, padding: '22px 24px', ...style }}>
-      <div style={{ fontFamily: C.sg, fontSize: 11, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.text, marginBottom: 3 }}>{title}</div>
-      {sub && <div style={{ fontFamily: C.ws, fontSize: 11, color: C.textDim, marginBottom: 18 }}>{sub}</div>}
-      {children}
-    </div>
-  )
-}
-
-function KpiCard({ label, value, sub, badge, badgeColor, topColor = C.amber, loading, error, onClick }) {
-  return (
-    <button onClick={onClick} disabled={!onClick} style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 4, padding: '20px 22px', position: 'relative', overflow: 'hidden', animation: 'fadeUp 0.4s ease both', textAlign: 'left', cursor: onClick ? 'pointer' : 'default', font: 'inherit', width: '100%' }}>
-      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: topColor }} />
-      <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.textDim, marginBottom: 7 }}>{label}</div>
-      {loading ? <Spinner /> : error ? <ErrorMsg msg={error} /> : (
-        <>
-          <div style={{ fontFamily: C.sg, fontSize: 30, fontWeight: 700, color: C.text, lineHeight: 1, marginBottom: 5 }}>{value ?? '—'}</div>
-          <div style={{ fontFamily: C.ws, fontSize: 11, color: C.textMid }}>{sub}</div>
-          {badge && <div style={{ marginTop: 8 }}><Badge label={badge} color={badgeColor || topColor} /></div>}
-        </>
-      )}
-    </button>
-  )
-}
-
-function DrilldownList({ title, items, meta }) {
-  return <SectionCard title={title} sub="Click Open in Notion to edit the source record" style={{ marginBottom: 16 }}>
-    {!items.length ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>No matching records</p> : items.map((item, i) => (
-      <div key={item.id || i} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '10px 0', borderBottom: i < items.length - 1 ? `1px solid ${C.border}` : 'none' }}>
-        <div><div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 600 }}>{item.name}</div><div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 3 }}>{meta(item)}</div></div>
-        {item.url && <a href={item.url} target="_blank" rel="noreferrer" aria-label={`Open ${item.name} in Notion`} style={{ fontFamily: C.sg, fontSize: 16, fontWeight: 700, color: C.amber, whiteSpace: 'nowrap' }}>↗</a>}
-      </div>
-    ))}
-  </SectionCard>
-}
-
-function ExpandableDomainRows({ risks }) {
-  const [domain, setDomain] = useState(null)
-  return Object.entries(risks.byDomain || {}).filter(([, value]) => value > 0).map(([name, value]) => {
-    const items = (risks.items || []).filter(item => item.domain === name)
-    const open = domain === name
-    return <div key={name} style={{ marginBottom: 10 }}>
-      <button onClick={() => setDomain(open ? null : name)} style={{ width: '100%', border: 0, background: 'none', padding: 0, cursor: 'pointer' }}><BarRow label={`${name} ${open ? '−' : '+'}`} value={value} max={risks.total} color={C.forest} /></button>
-      {open && <div style={{ margin: '2px 0 10px 12px', paddingLeft: 12, borderLeft: `2px solid ${C.amber}` }}>
-        {items.map(item => <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '6px 0', fontFamily: C.ws, fontSize: 11 }}><span>{item.name}</span>{item.url && <a href={item.url} target="_blank" rel="noreferrer" style={{ color: C.amber }}>↗</a>}</div>)}
-      </div>}
-    </div>
-  })
-}
-
-function RowItem({ name, meta, badge, badgeColor, last = false }) {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: last ? 'none' : '1px solid rgba(17,48,42,0.06)', gap: 8 }}>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text, lineHeight: 1.35 }}>{name}</div>
-        {meta && <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{meta}</div>}
-      </div>
-      {badge && <Badge label={badge} color={badgeColor} />}
-    </div>
-  )
-}
-
-function DonutRing({ pct, color, size = 100 }) {
-  const r = (size - 10) / 2
-  const circ = 2 * Math.PI * r
-  const dash = (pct / 100) * circ
-  return (
-    <div style={{ position: 'relative', width: size, height: size, flexShrink: 0 }}>
-      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(17,48,42,0.07)" strokeWidth={9} />
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={9}
-          strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"
-          style={{ transition: 'stroke-dasharray 1.2s ease' }} />
-      </svg>
-      <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-        <span style={{ fontFamily: C.sg, fontSize: 17, fontWeight: 700, color, lineHeight: 1 }}>{pct}%</span>
-        <span style={{ fontFamily: C.ws, fontSize: 8, color: C.textDim, letterSpacing: '0.05em', textTransform: 'uppercase', marginTop: 2 }}>Active</span>
-      </div>
-    </div>
-  )
-}
-
-function RegisterTab({ title, sub, data, loading, error, owner, fields, groupBy }) {
-  // RoPA and some IT-tool records do not have a person owner. Keep those
-  // visible when filtering rather than incorrectly showing an empty register.
-  const items = (data?.items || []).filter(item => owner === 'All people' || !item.owner || item.owner.includes(owner))
-  const labels = { name: 'Risk Name', owner: 'Risk Owner', probability: 'Probability', controlStatus: 'Control Status', domain: 'Domain', status: 'Status', type: 'Type', reviewDate: 'Review Date', nextReviewDate: 'Next Review Date', businessFunction: 'Business Function', dpiaProgress: 'DPIA Progress', lastRetentionReviewDate: 'Last Retention Review Date', toolStatus: 'Tool Status', mfaStatus: '2FA/MFA Status', nextRenewalDate: 'Next Renewal Date' }
+function Pager({ items, children }) {
   const [page, setPage] = useState(0)
-  const [expandedGroup, setExpandedGroup] = useState(null)
-  const pageSize = 10
-  const pageCount = Math.max(1, Math.ceil(items.length / pageSize))
-  const shown = items.slice(page * pageSize, (page + 1) * pageSize)
-  if (loading) return <SectionCard title={title}><Spinner /></SectionCard>
-  if (error) return <SectionCard title={title}><ErrorMsg msg={error} /></SectionCard>
-  return <SectionCard title={title} sub={sub}>
-    {groupBy && <div style={{ marginBottom: 16 }}>{Object.entries(items.reduce((groups, item) => { const key = item[groupBy] || 'Uncategorised'; (groups[key] ||= []).push(item); return groups }, {})).map(([name, grouped]) => <div key={name} style={{ borderBottom: `1px solid ${C.border}`, padding: '7px 0' }}><button onClick={() => setExpandedGroup(expandedGroup === name ? null : name)} style={{ border: 0, background: 'none', cursor: 'pointer', fontFamily: C.ws, fontSize: 12, color: C.text }}>{expandedGroup === name ? '−' : '+'} {name} <strong style={{ marginLeft: 8 }}>{grouped.length}</strong></button>{expandedGroup === name && grouped.map(item => <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', margin: '7px 0 2px 20px', fontFamily: C.ws, fontSize: 11 }}><span>{item.name}</span><a href={item.url} target="_blank" rel="noreferrer" style={{ color: C.amber }}>↗</a></div>)}</div>)}</div>}
-    {!items.length ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>No matching records</p> : <><div style={{ overflowX: 'auto' }}><div style={{ display: 'grid', gridTemplateColumns: `minmax(220px, 2fr) repeat(${fields.length - 1}, minmax(100px, 1fr))`, gap: 12, minWidth: 650, paddingBottom: 8, borderBottom: `1px solid ${C.border}` }}>{fields.map(field => <span key={field} style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.1em', color: C.textDim }}>{labels[field] || field}</span>)}</div>{shown.map((item, i) => (
-      <a key={item.id} href={item.url} target="_blank" rel="noreferrer" style={{ display: 'grid', gridTemplateColumns: `minmax(220px, 2fr) repeat(${fields.length - 1}, minmax(100px, 1fr))`, gap: 12, minWidth: 650, padding: '11px 0', borderBottom: i < items.length - 1 ? `1px solid ${C.border}` : 'none', textDecoration: 'none' }}>
-        <span style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 600, color: C.text }}>{item.name} ↗</span>
-        {fields.slice(1).map(field => <span key={field} style={{ fontFamily: C.ws, fontSize: 11, color: C.textMid }}>{item[field] || '—'}</span>)}
-      </a>
-    ))}</div><div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 10, marginTop: 12 }}><button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0} style={{ border: 0, background: 'none', color: C.amber, fontFamily: C.sg, fontSize: 10, cursor: page === 0 ? 'default' : 'pointer' }}>← PREVIOUS</button><span style={{ fontFamily: C.sg, fontSize: 10, color: C.textDim }}>{page + 1} / {pageCount}</span><button onClick={() => setPage(Math.min(pageCount - 1, page + 1))} disabled={page === pageCount - 1} style={{ border: 0, background: 'none', color: C.amber, fontFamily: C.sg, fontSize: 10, cursor: page === pageCount - 1 ? 'default' : 'pointer' }}>NEXT →</button></div></>}
-  </SectionCard>
+  const pageCount = Math.max(1, Math.ceil(items.length / 10))
+  const currentPage = Math.min(page, pageCount - 1)
+  const start = currentPage * 10
+  const visible = items.slice(start, start + 10)
+  return <>{children(visible)}<footer className="pager"><span>{items.length ? `Showing ${start + 1}–${Math.min(start + 10, items.length)} of ${items.length}` : 'No matching records'}</span><button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>‹</button><span>{currentPage + 1} / {pageCount}</span><button type="button" disabled={currentPage === pageCount - 1} onClick={() => setPage(currentPage + 1)}>›</button></footer></>
 }
 
-function RegisterProgress({ title, items, definitions }) {
-  const total = items?.length || 0
-  return <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(165px, 1fr))', gap: 12, marginBottom: 14 }}>
-    {definitions.map(({ label, test, color }) => {
-      const count = (items || []).filter(test).length
-      return <div key={label} style={{ background: C.white, border: `1px solid ${C.border}`, borderTop: `3px solid ${color}`, borderRadius: 4, padding: '15px 17px' }}>
-        <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', color: C.textDim }}>{label}</div>
-        <div style={{ fontFamily: C.sg, fontSize: 25, fontWeight: 700, color: C.text, margin: '7px 0 3px' }}>{count}</div>
-        <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim }}>{total} total records</div>
-      </div>
-    })}
-  </div>
-}
-
-function countValues(items, key, defaults) {
-  const result = { ...defaults }
-  for (const item of items) if (item[key] && item[key] in result) result[item[key]]++
-  return result
-}
-
-function matchesOwner(item, owner) {
-  return owner === 'All people' || !item.owner || item.owner.includes(owner)
-}
-
-// ── Tab panels ───────────────────────────────────────────────────
-
-function OverviewTab({ risks, controls, tracker, loading, errors }) {
-  const r = risks || {}
-  const c = controls || {}
-  const t = tracker || {}
-  const [drilldown, setDrilldown] = useState(null)
-
-  const highN        = r.byProbability?.High ?? 0
-  const openN        = r.byCategory?.Open ?? 0
-  const inActiveN    = c.byStatus?.Active ?? 0
-  const controlPct   = c.total > 0 ? Math.round((inActiveN / c.total) * 100) : 0
-  const doneN        = t.byStatus?.Done ?? 0
-  const overdueN     = t.byStatus?.Overdue ?? 0
-  const denom        = (t.total || 0) - (t.byStatus?.Skipped || 0)
-  const completionPct = denom > 0 ? Math.round((doneN / denom) * 100) : 0
-
-  const upcoming = t.upcoming || []
-
-  return (
-    <div>
-      <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 14 }}>
-        KEY INDICATORS — {new Date().toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }).toUpperCase()}
-      </div>
-
-      {/* KPI strip */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <KpiCard label="Total Risks" value={r.total} sub="Unified risk register" topColor={C.forest} loading={loading.risks} error={errors.risks} />
-        <KpiCard label="High Probability" value={highN} sub="Requiring attention"
-          topColor={highN > 0 ? C.coral : C.positive}
-          badge={highN > 0 ? 'Action needed' : 'Under control'}
-          badgeColor={highN > 0 ? C.coral : C.positive}
-          loading={loading.risks} error={errors.risks} onClick={() => setDrilldown(drilldown === 'high' ? null : 'high')} />
-        <KpiCard label="Open Risks" value={openN} sub="Awaiting mitigation" topColor={C.amber} loading={loading.risks} error={errors.risks} onClick={() => setDrilldown(drilldown === 'open' ? null : 'open')} />
-        <KpiCard label="Controls Active" value={c.total ? `${controlPct}%` : null} sub={c.total ? `${inActiveN} of ${c.total} controls` : ''}
-          topColor={controlPct >= 80 ? C.positive : controlPct >= 50 ? C.amber : C.coral}
-          badge={controlPct >= 80 ? 'Strong coverage' : controlPct >= 50 ? 'Partial coverage' : 'Gaps present'}
-          badgeColor={controlPct >= 80 ? C.positive : controlPct >= 50 ? C.amber : C.coral}
-          loading={loading.controls} error={errors.controls} />
-        <KpiCard label="Activities Done" value={t.total ? `${completionPct}%` : null} sub={t.total ? `${doneN} of ${denom} activities` : ''}
-          topColor={completionPct >= 70 ? C.positive : completionPct >= 40 ? C.amber : C.coral}
-          loading={loading.tracker} error={errors.tracker} onClick={() => setDrilldown(drilldown === 'done' ? null : 'done')} />
-        <KpiCard label="Overdue" value={overdueN} sub="Past due date"
-          topColor={overdueN > 0 ? C.coral : C.positive}
-          badge={overdueN > 0 ? 'Action needed' : 'All on track'}
-          badgeColor={overdueN > 0 ? C.coral : C.positive}
-          loading={loading.tracker} error={errors.tracker} />
-      </div>
-
-      {drilldown === 'high' && <DrilldownList title="High Probability Risks" items={(r.items || []).filter(item => item.probability === 'High')} meta={item => `${item.domain || '—'} · ${item.controlStatus || '—'}`} />}
-      {drilldown === 'open' && <DrilldownList title="Open Risks" items={(r.items || []).filter(item => item.category === 'Open')} meta={item => `${item.probability || '—'} · ${item.domain || '—'}`} />}
-      {drilldown === 'done' && <DrilldownList title="Completed Activities" items={(t.items || []).filter(item => item.status === 'Done')} meta={item => `${item.type || 'Activity'} · ${item.owner || 'Unassigned'} · Done`} />}
-
-      {/* Safeguarding status strip */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 10 }}>SAFEGUARDING STATUS</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
-          {[
-            { label: 'SFP Appointed', value: 'Appointed', sub: 'Sumaiya Karim', color: C.positive },
-            { label: 'Incidents YTD', value: '0 reported', sub: `Jan – ${new Date().toLocaleDateString('en-GB',{month:'short'})} ${new Date().getFullYear()}`, color: C.positive },
-            { label: 'Code of Conduct', value: 'Not verified', sub: 'Sign-off status unconfirmed', color: C.amber },
-            { label: 'Mandatory Training', value: 'Not verified', sub: 'Completion rate unknown', color: C.amber },
-          ].map(({ label, value, sub, color }) => (
-            <div key={label} style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 4, padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Dot color={color} size={10} />
-              <div>
-                <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 3 }}>{label}</div>
-                <div style={{ fontFamily: C.sg, fontSize: 13, fontWeight: 600, color }}>{value}</div>
-                <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim }}>{sub}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Lower grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        <SectionCard title="Risk Register — By Domain" sub={r.total ? `${r.total} total risks across all domains` : ' '}>
-          {loading.risks ? <Spinner /> : errors.risks ? <ErrorMsg msg={errors.risks} /> :
-            <ExpandableDomainRows risks={r} />
-          }
-        </SectionCard>
-
-        <SectionCard title="Upcoming Deadlines" sub="Next activities due">
-          {loading.tracker ? <Spinner /> : errors.tracker ? <ErrorMsg msg={errors.tracker} /> :
-            !upcoming.length
-              ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>No upcoming items</p>
-              : upcoming.map((item, i) => {
-                  const isOverdue = item.status === 'Overdue'
-                  const sc = isOverdue ? C.coral : item.status === 'In Progress' ? C.amber : 'rgba(17,48,42,0.25)'
-                  return (
-                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: i < upcoming.length - 1 ? '1px solid rgba(17,48,42,0.06)' : 'none', gap: 8 }}>
-                      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flex: 1 }}>
-                        <Dot color={sc} />
-                        <div>
-                          <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text, lineHeight: 1.35 }}>{item.url ? <a href={item.url} target="_blank" rel="noreferrer" style={{ textDecoration: 'none' }}>{item.name} <span style={{ color: C.amber }}>↗</span></a> : item.name}</div>
-                          <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{item.dueDate} · {item.owner}</div>
-                        </div>
-                      </div>
-                      <Badge label={item.status} color={sc} />
-                    </div>
-                  )
-                })
-          }
-        </SectionCard>
-      </div>
-    </div>
-  )
-}
-
-function RisksTab({ risks, loading, errors }) {
-  const r = risks || {}
-  if (loading.risks) return <SectionCard title="Risk Register"><Spinner /></SectionCard>
-  if (errors.risks)  return <SectionCard title="Risk Register"><ErrorMsg msg={errors.risks} /></SectionCard>
-
-  return (
-    <div>
-      <SectionCard title="Risk Register — Domain Breakdown" sub={`${r.total} total risks · Live from Notion`} style={{ marginBottom: 14 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
-          {Object.entries(r.byDomain || {}).map(([domain, count]) => {
-            const pct = r.total > 0 ? Math.round((count / r.total) * 100) : 0
-            return (
-              <div key={domain} style={{ background: C.cream, borderRadius: 4, padding: '14px 16px' }}>
-                <div style={{ fontFamily: C.sg, fontSize: 8, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: C.textDim, marginBottom: 6 }}>{domain}</div>
-                <div style={{ fontFamily: C.sg, fontSize: 26, fontWeight: 700, color: C.text, lineHeight: 1 }}>{count}</div>
-                <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 3 }}>{pct}% of total</div>
-                <div style={{ height: 3, background: 'rgba(17,48,42,0.07)', borderRadius: 2, marginTop: 8 }}>
-                  <div style={{ height: 3, width: `${pct}%`, background: C.amber, borderRadius: 2, transition: 'width 1s ease' }} />
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </SectionCard>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14 }}>
-        {[
-          { title: 'Probability', items: [
-            { label: 'High', value: r.byProbability?.High ?? 0, color: C.coral },
-            { label: 'Medium', value: r.byProbability?.Medium ?? 0, color: C.amber },
-            { label: 'Low', value: r.byProbability?.Low ?? 0, color: C.positive },
-          ]},
-          { title: 'Category', items: [
-            { label: 'Open', value: r.byCategory?.Open ?? 0, color: C.amber },
-            { label: 'Addressed', value: r.byCategory?.Addressed ?? 0, color: C.olive },
-            { label: 'Closed', value: r.byCategory?.Closed ?? 0, color: C.positive },
-          ]},
-          { title: 'Control Status', items: [
-            { label: 'In Place', value: r.byControlStatus?.['In Place'] ?? 0, color: C.positive },
-            { label: 'Partial', value: r.byControlStatus?.Partial ?? 0, color: C.amber },
-            { label: 'Not In Place', value: r.byControlStatus?.['Not In Place'] ?? 0, color: C.coral },
-          ]},
-        ].map(({ title, items }) => (
-          <SectionCard key={title} title={title} sub=" ">
-            {items.map(({ label, value, color }, i) => (
-              <div key={label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: i < items.length - 1 ? '1px solid rgba(17,48,42,0.06)' : 'none' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Dot color={color} size={8} />
-                  <span style={{ fontFamily: C.ws, fontSize: 13, color: C.text }}>{label}</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontFamily: C.sg, fontSize: 20, fontWeight: 700, color }}>{value}</span>
-                  <Badge label={`${r.total > 0 ? Math.round((value/r.total)*100) : 0}%`} color={color} />
-                </div>
-              </div>
-            ))}
-          </SectionCard>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function ControlsTab({ controls, loading, errors }) {
-  const c = controls || {}
-  if (loading.controls) return <SectionCard title="Controls"><Spinner /></SectionCard>
-  if (errors.controls)  return <SectionCard title="Controls"><ErrorMsg msg={errors.controls} /></SectionCard>
-
-  const activeN = c.byStatus?.Active ?? 0
-  const pct = c.total > 0 ? Math.round((activeN / c.total) * 100) : 0
-  const ringColor = pct >= 80 ? C.positive : pct >= 50 ? C.amber : C.coral
-
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-      <SectionCard title="Controls Coverage" sub={`${c.total} controls registered`}>
-        <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
-          <DonutRing pct={pct} color={ringColor} />
-          <div style={{ flex: 1 }}>
-            {Object.entries(c.byStatus || {}).map(([status, count]) => {
-              const col = status === 'Active' ? C.positive : status === 'Partial' ? C.amber : status === 'Planned' ? C.olive : C.coral
-              return <BarRow key={status} label={status} value={count} max={c.total} color={col} />
-            })}
-          </div>
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Controls — By Domain" sub={`${c.total} controls across domains`}>
-        {Object.entries(c.byDomain || {}).map(([domain, count]) =>
-          <BarRow key={domain} label={domain} value={count} max={c.total} color={C.forest} />
-        )}
-        <div style={{ background: C.cream, borderRadius: 4, padding: '12px 14px', marginTop: 16 }}>
-          <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 8 }}>Status legend</div>
-          {[
-            { label: 'Active — fully implemented', color: C.positive },
-            { label: 'Partial — partially implemented', color: C.amber },
-            { label: 'Planned — scheduled', color: C.olive },
-            { label: 'Not In Place — gap present', color: C.coral },
-          ].map(({ label, color }) => (
-            <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
-              <Dot color={color} />
-              <span style={{ fontFamily: C.ws, fontSize: 11, color: C.textMid }}>{label}</span>
-            </div>
-          ))}
-        </div>
-      </SectionCard>
-    </div>
-  )
-}
-
-function RhythmTab({ tracker, loading, errors }) {
-  const t = tracker || {}
-  if (loading.tracker) return <SectionCard title="Compliance Rhythm"><Spinner /></SectionCard>
-  if (errors.tracker)  return <SectionCard title="Compliance Rhythm"><ErrorMsg msg={errors.tracker} /></SectionCard>
-
-  const done        = t.byStatus?.Done ?? 0
-  const inProgress  = t.byStatus?.['In Progress'] ?? 0
-  const overdue     = t.byStatus?.Overdue ?? 0
-  const notStarted  = t.byStatus?.['To Do'] ?? 0
-  const denom       = (t.total || 0) - (t.byStatus?.Skipped || 0)
-  const pct         = denom > 0 ? Math.round((done / denom) * 100) : 0
-  const rhythmColor = pct >= 70 ? C.positive : pct >= 40 ? C.amber : C.coral
-  const upcoming    = t.upcoming || []
-
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-      <SectionCard title="Activity Status" sub={`${t.total} governance activities total`}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 18 }}>
-          {[
-            { label: 'Done', value: done, color: C.positive },
-            { label: 'In Progress', value: inProgress, color: C.amber },
-            { label: 'Overdue', value: overdue, color: overdue > 0 ? C.coral : C.textDim },
-            { label: 'To Do', value: notStarted, color: C.textDim },
-          ].map(({ label, value, color }) => (
-            <div key={label} style={{ background: C.cream, borderRadius: 4, padding: '12px 10px', textAlign: 'center' }}>
-              <div style={{ fontFamily: C.sg, fontSize: 24, fontWeight: 700, color, lineHeight: 1 }}>{value}</div>
-              <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 4 }}>{label}</div>
-            </div>
-          ))}
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-          <span style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textDim }}>Completion rate</span>
-          <span style={{ fontFamily: C.sg, fontSize: 14, fontWeight: 700, color: rhythmColor }}>{pct}%</span>
-        </div>
-        <div style={{ height: 5, background: 'rgba(17,48,42,0.07)', borderRadius: 3 }}>
-          <div style={{ height: 5, width: `${pct}%`, background: rhythmColor, borderRadius: 3, transition: 'width 1.2s ease' }} />
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Upcoming Deadlines" sub="Next 5 activities due">
-        {!upcoming.length
-          ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>Nothing upcoming</p>
-          : upcoming.map((item, i) => {
-              const isOverdue = item.status === 'Overdue'
-              const sc = isOverdue ? C.coral : item.status === 'In Progress' ? C.amber : 'rgba(17,48,42,0.25)'
-              return (
-                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: i < upcoming.length - 1 ? '1px solid rgba(17,48,42,0.06)' : 'none', gap: 8 }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text }}>{item.name}</div>
-                    <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{item.dueDate} · {item.owner}</div>
-                  </div>
-                  <Badge label={item.status} color={sc} />
-                </div>
-              )
-            })
-        }
-      </SectionCard>
-    </div>
-  )
-}
-
-function SafeguardingTab({ risks, loading, errors }) {
-  const r = risks || {}
-  const sgRisks = [
-    { name: 'Vacant safeguarding lead — governance gap', meta: 'Probability: High · Consequences: Major', badge: 'Open · High', color: C.coral },
-    { name: 'Safeguarding incident during field research', meta: 'Probability: Medium · Consequences: Major', badge: 'Open', color: C.amber },
-    { name: 'Failure to report safeguarding concerns', meta: 'Probability: Medium · Consequences: Major', badge: 'Open', color: C.amber },
-    { name: 'Inconsistent safeguarding training across staff', meta: 'Probability: Medium · Consequences: Moderate', badge: 'Open', color: C.amber },
-    { name: 'Inappropriate one-on-one interactions', meta: 'Probability: Low · Consequences: Major', badge: 'Open', color: C.amber },
-    { name: 'Publication of images without consent', meta: 'Probability: Low · Consequences: Major', badge: 'Open', color: C.amber },
+function Overview({ risks, controls, tracker, documents, onOpen }) {
+  const active = controls.byStatus.Active || 0
+  const available = tracker.total - (tracker.byStatus.Skipped || 0)
+  const metrics = [
+    { label: 'Total risks', value: risks.total, onClick: () => onOpen('risks', 'all') },
+    { label: 'High probability', value: risks.byProbability.High || 0, tone: 'critical', onClick: () => onOpen('risks', 'high') },
+    { label: 'Open risks', value: risks.byCategory.Open || 0, tone: 'attention', onClick: () => onOpen('risks', 'open') },
+    { label: 'Controls active', value: `${controls.total ? Math.round(active / controls.total * 100) : 0}%`, onClick: () => onOpen('controls', 'Active') },
+    { label: 'Activities done', value: `${available ? Math.round((tracker.byStatus.Done || 0) / available * 100) : 0}%`, onClick: () => onOpen('tracker', 'Done') },
+    { label: 'Overdue', value: tracker.byStatus.Overdue || 0, tone: 'critical', onClick: () => onOpen('tracker', 'Overdue') },
   ]
-  const forms = [
-    { icon: '🚨', label: 'Safeguarding Incident Report Form', sub: 'Report within 24 hours', url: 'https://forms.gle/bxUfXpGnETCLXrPf6' },
-    { icon: '🔗', label: 'Field Visit Pre-Departure Form', sub: 'Required ≥12 hrs before travel', url: 'https://forms.gle/6KrsSfQYJGxKgidb9' },
-    { icon: '🔗', label: 'Code of Conduct Sign-off Form', sub: 'Required for all staff & contractors', url: 'https://forms.gle/TrKsotFPR55ocGeX8' },
-    { icon: '🔒', label: 'Anonymous Code of Conduct Breach', sub: 'Confidential reporting channel', url: 'https://docs.google.com/forms/d/e/1FAIpQLSdGLuBYGg6SQyZlseDJzF7mYKQvXXz5NbQIOAlsGlgKEYP3LA/viewform' },
-  ]
-  const consentForms = [
-    { icon: '📸', label: 'General Photo Consent', sub: 'Adults · general use', url: 'https://connect-go.kontainer.com/consent/consent-collections/2184bcbf6b594d889802b4d263482185' },
-    { icon: '📸', label: 'Media Consent — Children', sub: 'Required for any child participants', url: 'https://connect-go.kontainer.com/consent/consent-collections/9d58ca5e291a4415a6539009ecdc7705' },
-    { icon: '📸', label: 'Media Consent — Adult Researchers', sub: 'Adults in research context', url: 'https://connect-go.kontainer.com/consent/consent-collections/74f7034c2a3f4bc9877ca5d996335819' },
-    { icon: '🔗', label: 'Professional Reference Check', sub: 'Recruitment screening', url: 'https://docs.google.com/forms/d/e/1FAIpQLSeo6JzaHUHemAr-YL3VjCUnBok-dLskHIYDgPfktkuGU0ikFg/viewform' },
-  ]
-
-  return (
-    <div>
-      {/* Status cards */}
-      <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 10 }}>GOVERNANCE STATUS</div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
-        {[
-          { label: 'Safeguarding Focal Person', value: 'Sumaiya Karim', sub: 'Appointed safeguarding focal person', topColor: C.positive, badge: 'Active', badgeColor: C.positive },
-          { label: 'Incidents This Year', value: '0', sub: `Jan – ${new Date().toLocaleDateString('en-GB',{month:'short',year:'numeric'})} · No reports`, topColor: C.positive, badge: 'All clear', badgeColor: C.positive },
-          { label: 'Code of Conduct Sign-off', value: 'Not verified', sub: 'Status unconfirmed across team', topColor: C.amber, badge: 'Action: confirm with Sumaiya', badgeColor: C.amber },
-          { label: 'Mandatory Training', value: 'Not verified', sub: 'Completion rate unknown', topColor: C.amber, badge: 'Action: confirm with Sumaiya', badgeColor: C.amber },
-        ].map(({ label, value, sub, topColor, badge, badgeColor }) => (
-          <div key={label} style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 4, padding: '20px 22px', position: 'relative', overflow: 'hidden' }}>
-            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: topColor }} />
-            <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.textDim, marginBottom: 7 }}>{label}</div>
-            <div style={{ fontFamily: C.sg, fontSize: value.length > 6 ? 16 : 28, fontWeight: 700, color: C.text, lineHeight: 1.1, marginBottom: 5 }}>{value}</div>
-            <div style={{ fontFamily: C.ws, fontSize: 11, color: C.textMid, marginBottom: 8 }}>{sub}</div>
-            <Badge label={badge} color={badgeColor} />
-          </div>
-        ))}
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        {/* Active risks */}
-        <SectionCard title="Safeguarding Risks — Active" sub={`${r.byDomain?.Safeguarding ?? 14} safeguarding risks in register`}>
-          {loading.risks ? <Spinner /> : errors.risks ? <ErrorMsg msg={errors.risks} /> :
-            sgRisks.map((risk, i) => (
-              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: i < sgRisks.length - 1 ? '1px solid rgba(17,48,42,0.06)' : 'none', gap: 8 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text, lineHeight: 1.35 }}>{risk.name}</div>
-                  <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{risk.meta}</div>
-                </div>
-                <Badge label={risk.badge} color={risk.color} />
-              </div>
-            ))
-          }
-          <div style={{ marginTop: 10 }}>
-            <Badge label="+ 8 further safeguarding risks in register" color={C.textDim} />
-          </div>
-        </SectionCard>
-
-        {/* Reporting & contacts */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <SectionCard title="Report an Incident" sub="All incidents must be reported within 24 hours">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {forms.map(({ icon, label, sub, url }) => (
-                <a key={label} href={url} target="_blank" rel="noreferrer"
-                  style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', background: C.cream, borderRadius: 4, textDecoration: 'none' }}>
-                  <span style={{ fontSize: 14 }}>{icon}</span>
-                  <div>
-                    <div style={{ fontFamily: C.sg, fontSize: 11, fontWeight: 600, color: C.forest }}>{label}</div>
-                    <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim }}>{sub}</div>
-                  </div>
-                </a>
-              ))}
-            </div>
-          </SectionCard>
-
-          <SectionCard title="Key Contacts" sub="Safeguarding escalation chain">
-            {[
-              { name: 'Safeguarding Focal Person', meta: 'Sumaiya Karim', badge: 'Active', color: C.positive },
-              { name: 'Director (escalation)', meta: 'Dr Kate McAlpine · kate@connectgo.co.uk', badge: 'Active', color: C.positive },
-              { name: 'DPO (data safeguarding)', meta: 'Belinda Mziray · belinda@connectgo.co.uk', badge: 'Active', color: C.positive },
-            ].map((c, i, arr) => (
-              <div key={c.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: i < arr.length - 1 ? '1px solid rgba(17,48,42,0.06)' : 'none' }}>
-                <div>
-                  <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text }}>{c.name}</div>
-                  <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{c.meta}</div>
-                </div>
-                <Badge label={c.badge} color={c.color} />
-              </div>
-            ))}
-          </SectionCard>
-        </div>
-      </div>
-
-      {/* Consent forms */}
-      <SectionCard title="Consent Forms" sub="Required before photography, filming, or data collection" style={{ marginTop: 14 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8 }}>
-          {consentForms.map(({ icon, label, sub, url }) => (
-            <a key={label} href={url} target="_blank" rel="noreferrer"
-              style={{ padding: '10px 14px', background: C.cream, borderRadius: 4, textDecoration: 'none', display: 'block' }}>
-              <div style={{ fontFamily: C.sg, fontSize: 10, fontWeight: 700, color: C.forest, marginBottom: 2 }}>{icon} {label}</div>
-              <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim }}>{sub}</div>
-            </a>
-          ))}
-        </div>
-      </SectionCard>
-    </div>
-  )
+  const domains = Object.entries(risks.byDomain || {}).filter(([, value]) => value)
+  return <><MetricBand metrics={metrics} /><div className="two-columns"><Panel title="Risk Register — By Domain" source="Unified Risk Register"><div className="bars">{domains.map(([label, value]) => <button type="button" key={label} onClick={() => onOpen('risks', 'all')}><span>{label}</span><i><em style={{ width: `${risks.total ? value / risks.total * 100 : 0}%` }} /></i><b>{value}</b></button>)}</div></Panel><Panel title="Upcoming Deadlines" source="Governance Tracker"><TaskRows items={tracker.upcoming} /></Panel></div></>
 }
 
-// ── Main app ─────────────────────────────────────────────────────
+function TaskRows({ items }) {
+  return <div className="rows">{items.length ? items.map(item => <div className="row" key={item.id}><div><NotionLink item={item}>{item.activityId ? `${item.activityId} · ` : ''}{item.name}</NotionLink><p>{item.owner || '—'} · {formatDate(item.dueDate)}</p></div><Badge>{item.status}</Badge></div>) : <p className="empty">No matching records</p>}</div>
+}
 
-const TABS = [
-  { id: 'overview',      label: 'Overview' },
-  { id: 'risks',         label: 'Risk Register' },
-  { id: 'controls',      label: 'Controls' },
-  { id: 'rhythm',        label: 'Compliance Rhythm' },
-  { id: 'safeguarding',  label: 'Safeguarding' },
-  { id: 'documents',     label: 'Document Library' },
-  { id: 'ropa',          label: 'RoPA' },
-  { id: 'tools',         label: 'IT Tools' },
-]
+function GovernanceTracker({ tracker, filter, onFilter }) {
+  const rows = tracker.items.filter(item => filter === 'all' || item.status === filter).sort((left, right) => (left.dueDate || '9999').localeCompare(right.dueDate || '9999'))
+  return <><FilterBar value={filter} onChange={onFilter} options={[['all', 'All'], ['To Do', 'To Do'], ['In Progress', 'In Progress'], ['Overdue', 'Overdue'], ['Done', 'Done'], ['Skipped', 'Skipped']]} /><Panel title="Governance Tracker" source="Governance Tracker"><Pager items={rows}>{visible => <div className="data-table tracker-table"><div className="table-head"><span>Activity</span><span>Person responsible</span><span>Deadline</span><span>Domain</span><span>Type</span><span>Priority</span><span>Status</span></div>{visible.map(item => <div className="table-row" key={item.id}><NotionLink item={item}>{item.activityId ? `${item.activityId} · ` : ''}{item.name}</NotionLink><span>{item.owner || '—'}</span><time>{formatDate(item.dueDate)}</time><span>{item.domain || '—'}</span><span>{item.type || '—'}</span><Badge>{item.priority}</Badge><Badge>{item.status}</Badge></div>)}</div>}</Pager></Panel></>
+}
+
+function RiskRegister({ risks, filter, onFilter }) {
+  const rows = risks.items.filter(item => filter === 'all' || filter === 'high' && item.probability === 'High' || filter === 'open' && item.category === 'Open')
+  return <><FilterBar value={filter} onChange={onFilter} options={[['all', 'All risks'], ['high', 'High probability'], ['open', 'Open risks']]} /><div className="two-columns"><Panel title="Risk Register — By Domain" source="Unified Risk Register"><div className="bars">{Object.entries(risks.byDomain || {}).filter(([, value]) => value).map(([label, value]) => <div key={label}><span>{label}</span><i><em style={{ width: `${risks.total ? value / risks.total * 100 : 0}%` }} /></i><b>{value}</b></div>)}</div></Panel><Panel title="High Probability" source="Unified Risk Register"><TaskRows items={risks.items.filter(item => item.probability === 'High').map(item => ({ ...item, activityId: item.riskId, dueDate: item.reviewDate, status: item.controlStatus }))} /></Panel></div><Panel title="Risk Register — Records" source="Unified Risk Register"><Pager items={rows}>{visible => <div className="data-table risk-table"><div className="table-head"><span>Risk</span><span>Domain</span><span>Probability</span><span>Impact</span><span>Control status</span><span>Risk category</span><span>Risk owner</span></div>{visible.map(item => <div className="table-row" key={item.id}><NotionLink item={item}>{item.riskId ? `${item.riskId} · ` : ''}{item.name}</NotionLink><span>{item.domain || '—'}</span><Badge>{item.probability}</Badge><span>{item.consequences || '—'}</span><Badge>{item.controlStatus}</Badge><Badge>{item.category}</Badge><span>{item.owner || '—'}</span></div>)}</div>}</Pager></Panel></>
+}
+
+function Controls({ controls, filter, onFilter }) {
+  const rows = controls.items.filter(item => filter === 'all' || item.status === filter)
+  const counts = controls.byStatus
+  return <><section className="state-band"><div><strong>{counts.Active || 0}</strong><span>Active</span></div><div><strong>{counts.Partial || 0}</strong><span>Partial</span></div><div><strong>{counts['Not In Place'] || 0}</strong><span>Not in place</span></div><div><strong>{controls.total ? `${Math.round((counts.Active || 0) / controls.total * 100)}%` : '0%'}</strong><span>Controls active</span></div></section><FilterBar value={filter} onChange={onFilter} options={[['all', 'All controls'], ['Active', 'Active'], ['Partial', 'Partial'], ['Not In Place', 'Not in place']]} /><Panel title="Controls Register" source="Controls Register"><Pager items={rows}>{visible => <div className="data-table controls-table"><div className="table-head"><span>Control</span><span>Domain</span><span>Control type</span><span>Status</span><span>Owner</span><span>Review date</span><span>Review frequency</span></div>{visible.map(item => <div className="table-row" key={item.id}><NotionLink item={item}>{item.controlId ? `${item.controlId} · ` : ''}{item.name}</NotionLink><span>{item.domain || '—'}</span><span>{item.type || '—'}</span><Badge>{item.status}</Badge><span>{item.owner || '—'}</span><time>{formatDate(item.reviewDate)}</time><span>{item.reviewFrequency || '—'}</span></div>)}</div>}</Pager></Panel></>
+}
+
+function DocumentLibrary({ documents, filter, onFilter }) {
+  const rows = documents.items.filter(item => filter === 'all' || item.status === filter)
+  return <><MetricBand metrics={[{ label: 'Approved', value: documents.byStatus.Approved || 0, tone: 'good', onClick: () => onFilter('Approved') }, { label: 'In review', value: documents.byStatus['In review'] || 0, onClick: () => onFilter('In review') }, { label: 'To be reviewed', value: documents.byStatus['To be reviewed'] || 0, tone: 'attention', onClick: () => onFilter('To be reviewed') }, { label: 'Documents', value: documents.total, onClick: () => onFilter('all') }]} /><FilterBar value={filter} onChange={onFilter} options={[['all', 'All documents'], ['Approved', 'Approved'], ['In review', 'In review'], ['To be reviewed', 'To be reviewed']]} /><Panel title="Document Library" source="Document Library"><Pager items={rows}>{visible => <div className="data-table document-table"><div className="table-head"><span>Document</span><span>Domain</span><span>Type</span><span>Owner</span><span>Status</span><span>Next review</span><span>Next approval</span></div>{visible.map(item => <div className="table-row" key={item.id}><NotionLink item={item}>{item.docId ? `${item.docId} · ` : ''}{item.name}</NotionLink><span>{item.domain || '—'}</span><span>{item.type || '—'}</span><span>{item.owner || '—'}</span><Badge>{item.status}</Badge><time>{formatDate(item.nextReviewDate)}</time><time>{formatDate(item.nextApprovalDate)}</time></div>)}</div>}</Pager></Panel></>
+}
+
+const ownerOf = person => item => !person || item.owner?.split(',').map(name => name.trim()).includes(person)
+
+function DashboardStyles() {
+  return <style>{`
+    @import url('https://fonts.googleapis.com/css2?family=Work+Sans:wght@400;500;600;700&display=swap');
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f7f4ee; color: #19332d; font-family: 'Work Sans', sans-serif; }
+    button, select { font: inherit; }
+    button { cursor: pointer; }
+    .hub { min-height: 100vh; }
+    .site-header { align-items: center; background: #17332d; color: #fff; display: flex; justify-content: space-between; min-height: 64px; padding: 0 4rem; }
+    .brand { align-items: baseline; display: flex; gap: 14px; }
+    .brand h1 { color: #fff; font-size: 25px; letter-spacing: -.07em; margin: 0; }
+    .brand h1 span { color: #e7a642; }
+    .brand p { color: rgba(255,255,255,.52); font-size: 10px; font-weight: 600; letter-spacing: .13em; margin: 0; text-transform: uppercase; }
+    .header-actions { align-items: center; display: flex; gap: 10px; }
+    .header-actions small { color: rgba(255,255,255,.5); font-size: 10px; }
+    .header-actions select { background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.24); color: #fff; font-size: 11px; padding: 7px 9px; }
+    .header-actions option { color: #19332d; }
+    .tab-nav { background: #17332d; display: flex; flex-wrap: wrap; padding: 0 3.25rem; }
+    .tab-nav button { background: transparent; border: 0; border-bottom: 3px solid transparent; color: rgba(255,255,255,.52); font-size: 10px; font-weight: 600; letter-spacing: .09em; padding: 11px 13px 9px; text-transform: uppercase; }
+    .tab-nav button:hover { color: #fff; }
+    .tab-nav button.active { border-bottom-color: #e7a642; color: #fff; }
+    .content { margin: 0 auto; max-width: 1500px; padding: 31px 4rem 52px; }
+    .eyebrow { border-bottom: 1px solid #d8dfd9; color: #486058; font-size: 11px; font-weight: 600; letter-spacing: .12em; margin-bottom: 20px; padding-bottom: 14px; text-transform: uppercase; }
+    .metric-band { background: #17332d; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 20px; }
+    .metric-band button { background: transparent; border: 0; border-left: 1px solid rgba(255,255,255,.14); color: #fff; min-height: 104px; padding: 19px 20px; text-align: left; }
+    .metric-band button:first-child { border-left: 0; }
+    .metric-band button:hover { background: #24453d; box-shadow: inset 0 -3px #e7a642; }
+    .metric-band span { color: rgba(255,255,255,.55); display: block; font-size: 9px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+    .metric-band strong { color: #fff; display: block; font-size: 31px; letter-spacing: -.06em; margin-top: 12px; }
+    .metric-band strong.critical { color: #f1b0a8; }
+    .metric-band strong.attention { color: #f2cc82; }
+    .metric-band strong.good { color: #a8d6b5; }
+    .two-columns { display: grid; gap: 16px; grid-template-columns: minmax(0, 1.1fr) minmax(300px, .9fr); margin-bottom: 20px; }
+    .panel { background: #fffdf8; border: 1px solid #dbe3dd; border-top: 3px solid #31594f; margin-bottom: 20px; min-width: 0; padding: 0 20px 16px; }
+    .two-columns .panel { margin-bottom: 0; }
+    .panel-heading { align-items: center; border-bottom: 1px solid #e0e6e1; display: flex; justify-content: space-between; margin-bottom: 8px; padding: 15px 0 12px; }
+    .panel-heading h2 { font-size: 12px; letter-spacing: .08em; margin: 0; text-transform: uppercase; }
+    .panel-heading span { border-bottom: 1px solid #bfd0c7; color: #547168; font-size: 9px; font-weight: 600; letter-spacing: .08em; padding-bottom: 2px; text-transform: uppercase; }
+    .bars > div, .bars > button { align-items: center; background: transparent; border: 0; border-bottom: 1px solid #e4e9e5; color: #19332d; display: grid; gap: 12px; grid-template-columns: minmax(100px,1fr) minmax(100px,2fr) 28px; padding: 12px 0; text-align: left; width: 100%; }
+    .bars > div:last-child, .bars > button:last-child { border-bottom: 0; }
+    .bars > button:hover { background: #f4f7f4; padding-left: 7px; }
+    .bars span { font-size: 12px; font-weight: 600; }
+    .bars i { background: #e4eae6; height: 5px; }
+    .bars em { background: #31594f; display: block; height: 100%; }
+    .bars b { font-size: 12px; text-align: right; }
+    .rows { padding: 0; }
+    .row { align-items: center; border-bottom: 1px solid #e5ebe6; display: grid; gap: 10px; grid-template-columns: minmax(0,1fr) auto; padding: 12px 0; }
+    .row:last-child { border-bottom: 0; }
+    .notion-link { color: #193b32; font-size: 12px; font-weight: 600; text-decoration: none; }
+    .notion-link span { color: #a56624; margin-left: 5px; }
+    .notion-link:hover { color: #a56624; text-decoration: underline; text-underline-offset: 3px; }
+    .row p { color: #7b8882; font-size: 10px; margin: 4px 0 0; }
+    .badge { border-left: 3px solid currentColor; display: inline-block; font-size: 9px; font-weight: 600; letter-spacing: .05em; padding: 4px 7px; text-transform: uppercase; white-space: nowrap; }
+    .badge.good { background: #e7f2eb; color: #3e7e56; }.badge.critical { background: #fae9e5; color: #ac483d; }.badge.attention { background: #fbf0db; color: #a36c24; }
+    .filter-bar { border-bottom: 1px solid #d7dfd9; display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 18px; padding-bottom: 13px; }
+    .filter-bar button { background: transparent; border: 1px solid #ced8d2; color: #60726b; font-size: 10px; font-weight: 600; padding: 6px 10px; }
+    .filter-bar button.selected, .filter-bar button:hover { background: #31594f; border-color: #31594f; color: #fff; }
+    .state-band { background: #fffdf8; border-top: 3px solid #31594f; display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); margin-bottom: 20px; padding: 3px 0; }
+    .state-band div { border-left: 1px solid #dde5df; padding: 14px 20px; }.state-band div:first-child { border-left: 0; }
+    .state-band strong { color: #1d3e35; display: block; font-size: 25px; letter-spacing: -.06em; }.state-band span { color: #7c8983; display: block; font-size: 10px; margin-top: 5px; }
+    .data-table { min-width: 810px; }.table-head, .table-row { display: grid; gap: 10px; padding: 9px 8px; }.table-head { background: #f0f4f0; color: #587168; font-size: 9px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }.table-row { align-items: center; border-bottom: 1px solid #e4e9e6; color: #5e7068; font-size: 11px; min-height: 48px; }.table-row:hover { background: #f4f8f4; }.tracker-table .table-head, .tracker-table .table-row { grid-template-columns: minmax(210px,2.4fr) 1fr .8fr 1fr .8fr .7fr .8fr; }.risk-table .table-head, .risk-table .table-row { grid-template-columns: minmax(220px,2.4fr) 1fr .8fr .8fr 1fr 1fr 1fr; }.controls-table .table-head, .controls-table .table-row { grid-template-columns: minmax(220px,2fr) 1fr 1fr .9fr 1fr .9fr 1fr; }.document-table .table-head, .document-table .table-row { grid-template-columns: minmax(220px,2fr) 1fr .8fr 1fr .9fr .9fr .9fr; }
+    .panel:has(.data-table) { overflow-x: auto; }.pager { align-items: center; border-top: 1px solid #e4e9e6; display: flex; gap: 9px; justify-content: flex-end; margin-top: 13px; padding-top: 12px; }.pager span { color: #839089; font-size: 10px; }.pager button { background: #fff; border: 1px solid #d1dad4; color: #31594f; font-size: 12px; padding: 4px 8px; }.pager button:disabled { color: #c1c9c4; cursor: default; }.empty { color: #8a9690; font-size: 11px; padding: 24px 4px; text-align: center; }
+    .notice { background: #fffdf8; border-left: 4px solid #c55b45; color: #8e3f35; margin-bottom: 20px; padding: 15px; }.loading { color: #60726b; font-size: 12px; padding: 22px 0; }footer.site-footer { border-top: 1px solid #d8dfd9; color: #8a9690; font-size: 10px; letter-spacing: .1em; margin: 0 4rem; padding: 18px 0 24px; text-transform: uppercase; }
+    @media (max-width: 900px) { .site-header { padding: 0 24px; }.tab-nav { padding: 0 18px; }.content { padding: 26px 24px 42px; }.metric-band { grid-template-columns: repeat(3, 1fr); }.metric-band button:nth-child(4) { border-left: 0; }.two-columns { grid-template-columns: 1fr; } footer.site-footer { margin: 0 24px; } }
+    @media (max-width: 560px) { .site-header { align-items: flex-start; flex-direction: column; gap: 10px; padding: 14px 16px; }.header-actions { justify-content: space-between; width: 100%; }.brand p { font-size: 8px; }.tab-nav { padding: 0 9px; }.tab-nav button { font-size: 9px; padding: 10px 7px 8px; }.content { padding: 22px 16px 34px; }.metric-band, .state-band { grid-template-columns: 1fr; }.metric-band button, .state-band div { border-left: 0; border-top: 1px solid rgba(255,255,255,.14); }.metric-band button:first-child, .state-band div:first-child { border-top: 0; }.state-band div { border-top-color: #dde5df; }.panel { padding: 0 14px 14px; }.panel-heading span { display: none; } footer.site-footer { margin: 0 16px; } }
+  `}</style>
+}
 
 export default function Dashboard() {
-  const [tab, setTab]           = useState('overview')
-  const [risks, setRisks]       = useState(null)
-  const [controls, setControls] = useState(null)
-  const [tracker, setTracker]   = useState(null)
-  const [documents, setDocuments] = useState(null)
-  const [ropa, setRopa] = useState(null)
-  const [tools, setTools] = useState(null)
-  const [owner, setOwner] = useState('All people')
-  const [loading, setLoading]   = useState({ risks: true, controls: true, tracker: true })
-  const [errors, setErrors]     = useState({})
-  const [lastSync, setLastSync] = useState(null)
-  const [syncing, setSyncing]   = useState(false)
-
+  const [tab, setTab] = useState('overview')
+  const [filter, setFilter] = useState('all')
+  const [person, setPerson] = useState('')
+  const [data, setData] = useState({})
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [synced, setSynced] = useState(null)
   const load = useCallback(async () => {
-    setSyncing(true)
-    setLoading({ risks: true, controls: true, tracker: true, documents: true, ropa: true, tools: true })
-    setErrors({})
-    const run = async (key, fn, set) => {
-      try { set(await fn()) }
-      catch (e) { setErrors(p => ({ ...p, [key]: e.message })) }
-      finally { setLoading(p => ({ ...p, [key]: false })) }
-    }
-    await Promise.all([
-      run('risks',    fetchRisks,    setRisks),
-      run('controls', fetchControls, setControls),
-      run('tracker',  fetchTracker,  setTracker),
-      run('documents', () => fetchDb('documents'), setDocuments),
-      run('ropa', () => fetchDb('ropa'), setRopa),
-      run('tools', () => fetchDb('tools'), setTools),
-    ])
-    setLastSync(new Date())
-    setSyncing(false)
+    setLoading(true); setError('')
+    try { const [risks, controls, tracker, documents] = await Promise.all(['risks', 'controls', 'tracker', 'documents'].map(get)); setData({ risks, controls, tracker, documents }); setSynced(new Date()) } catch (reason) { setError(reason.message) } finally { setLoading(false) }
   }, [])
-
   useEffect(() => { load() }, [load])
-
-  const filterRegister = (register, summaries) => {
-    if (!register?.items || owner === 'All people') return register
-    const items = register.items.filter(item => matchesOwner(item, owner))
-    return { ...register, total: items.length, items, ...Object.fromEntries(summaries.map(([name, key, defaults]) => [name, countValues(items, key, defaults)])) }
-  }
-  const visibleRisks = filterRegister(risks, [
-    ['byProbability', 'probability', { High: 0, Medium: 0, Low: 0 }],
-    ['byDomain', 'domain', { 'Data Protection': 0, Safeguarding: 0, Commercial: 0, Operational: 0, Regulatory: 0, Reputational: 0 }],
-    ['byControlStatus', 'controlStatus', { 'In Place': 0, Partial: 0, 'Not In Place': 0, 'Not Applicable': 0 }],
-    ['byCategory', 'category', { Open: 0, Addressed: 0, Closed: 0 }],
-  ])
-  const visibleControls = filterRegister(controls, [
-    ['byStatus', 'status', { Active: 0, Partial: 0, Planned: 0, 'Not In Place': 0 }],
-    ['byDomain', 'domain', { 'Data Protection': 0, Safeguarding: 0, Commercial: 0 }],
-  ])
-  const visibleTracker = filterRegister(tracker, [['byStatus', 'status', { Done: 0, 'In Progress': 0, 'To Do': 0, Overdue: 0, Skipped: 0 }]])
-  if (visibleTracker?.items) visibleTracker.upcoming = visibleTracker.items.filter(item => item.dueDate && !['Done', 'Skipped'].includes(item.status)).sort((a, b) => a.dueDate.localeCompare(b.dueDate)).slice(0, 5)
-  const currentTab = TABS.find(t => t.id === tab)
-
-  return (
-    <div style={{ minHeight: '100vh', background: C.cream, fontFamily: C.ws }}>
-      <style>{GLOBAL_CSS}</style>
-
-      {/* Header */}
-      <div style={{ background: C.forest, borderBottom: `3px solid ${C.amber}`, position: 'sticky', top: 0, zIndex: 100 }}>
-        <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0 40px', height: 64, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
-            <span style={{ fontFamily: C.sg, fontSize: 20, fontWeight: 700, color: C.cream, letterSpacing: '-0.01em' }}>
-              CONNECT<span style={{ color: C.amber }}>GO</span>
-            </span>
-            <span style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 600, letterSpacing: '0.16em', textTransform: 'uppercase', color: 'rgba(245,242,236,0.38)' }}>
-              Governance &amp; Compliance
-            </span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            {lastSync && (
-              <span style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'rgba(245,242,236,0.35)' }}>
-                LAST SYNC: {lastSync.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-              </span>
-            )}
-            <select aria-label="Filter by owner" value={owner} onChange={e => setOwner(e.target.value)} style={{ background: C.forest, border: `1px solid ${C.yellow}`, borderRadius: 3, padding: '7px 9px', fontFamily: C.sg, fontSize: 10, color: C.yellow }}>
-              <option>All people</option>
-              <option>Belinda Mziray</option>
-              <option>Kate McAlpine</option>
-              <option>Sumaiya Karim</option>
-              <option>Samuel Mounsey</option>
-            </select>
-            <button onClick={load} disabled={syncing} style={{
-              background: syncing ? 'rgba(255,255,255,0.06)' : `${C.yellow}22`,
-              border: `1px solid ${syncing ? 'rgba(255,255,255,0.12)' : C.yellow}`,
-              borderRadius: 3, padding: '7px 14px',
-              fontFamily: C.sg, fontSize: 10, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase',
-              color: syncing ? 'rgba(255,255,255,0.25)' : C.yellow,
-              cursor: syncing ? 'not-allowed' : 'pointer', transition: 'all 0.2s',
-            }}>
-              {syncing ? '↻ Syncing…' : '↻ Sync'}
-            </button>
-          </div>
-        </div>
-
-        {/* Tabs */}
-        <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0 40px', display: 'flex', gap: 28 }}>
-          {TABS.map(t => (
-            <button key={t.id} onClick={() => setTab(t.id)} style={{
-              padding: '0 0 14px', background: 'none', border: 'none',
-              borderBottom: `2px solid ${tab === t.id ? C.yellow : 'transparent'}`,
-              fontFamily: C.sg, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase',
-              color: tab === t.id ? C.yellow : 'rgba(245,242,236,0.45)',
-              cursor: 'pointer', transition: 'all 0.18s', whiteSpace: 'nowrap',
-            }}>{t.label}</button>
-          ))}
-        </div>
-      </div>
-
-      {/* Page label */}
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '20px 40px 8px' }}>
-        <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: C.textDim }}>
-          {currentTab?.label?.toUpperCase()} — CONNECTGO LIMITED
-        </div>
-      </div>
-
-      {/* Content */}
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '14px 40px 52px' }}>
-        {tab === 'overview'     && <OverviewTab     risks={visibleRisks} controls={visibleControls} tracker={visibleTracker} loading={loading} errors={errors} />}
-        {tab === 'risks'        && <RisksTab        risks={visibleRisks} loading={loading} errors={errors} />}
-        {tab === 'risks'        && <div style={{ marginTop: 14 }}><RegisterTab title="Risk Register — Records" sub="Click a risk to open and edit it in Notion" data={risks} loading={loading.risks} error={errors.risks} owner={owner} fields={['name', 'owner', 'probability', 'controlStatus']} /></div>}
-        {tab === 'controls'     && <ControlsTab     controls={visibleControls} loading={loading} errors={errors} />}
-        {tab === 'controls'     && <div style={{ marginTop: 14 }}><RegisterTab title="Controls — Records" sub="Click a control to open and edit it in Notion" data={controls} loading={loading.controls} error={errors.controls} owner={owner} fields={['name', 'owner', 'status', 'reviewDate']} /></div>}
-        {tab === 'rhythm'       && <RhythmTab       tracker={visibleTracker} loading={loading} errors={errors} />}
-        {tab === 'safeguarding' && <SafeguardingTab risks={risks} loading={loading} errors={errors} />}
-        {tab === 'documents' && <RegisterTab title="Document Library" sub="In review, approved and upcoming review dates" data={documents} loading={loading.documents} error={errors.documents} owner={owner} fields={['name', 'domain', 'status', 'nextReviewDate']} />}
-        {tab === 'ropa' && <><RegisterProgress title="RoPA progress" items={ropa?.items} definitions={[{ label: 'DPIA REQUIRED', test: x => x.dpiaProgress && x.dpiaProgress !== 'N/A', color: C.coral }, { label: 'RETENTION REVIEW', test: x => !x.lastRetentionReviewDate, color: C.amber }, { label: 'ACTIVITIES', test: () => true, color: C.forest }]} /><RegisterTab title="Register of Processing Activities" sub="Business function, DPIA progress and retention review — click a record to edit in Notion" data={ropa} loading={loading.ropa} error={errors.ropa} owner={owner} fields={['name', 'businessFunction', 'dpiaProgress', 'lastRetentionReviewDate']} groupBy="businessFunction" /></>}
-        {tab === 'tools' && <><RegisterProgress title="IT tools progress" items={tools?.items} definitions={[{ label: 'MFA NOT CONFIRMED', test: x => x.mfaStatus !== 'Enabled', color: C.coral }, { label: 'REVIEW REQUIRED', test: x => x.toolStatus !== 'Active', color: C.amber }, { label: 'TOOLS REGISTERED', test: () => true, color: C.forest }]} /><RegisterTab title="IT Tools & Access Matrix" sub="Tool status, MFA and renewal date — click a record to edit in Notion" data={tools} loading={loading.tools} error={errors.tools} owner={owner} fields={['name', 'toolStatus', 'mfaStatus', 'nextRenewalDate']} /></>}
-      </div>
-
-      {/* Footer */}
-      <div style={{ borderTop: `1px solid ${C.border}`, padding: '14px 40px', maxWidth: 1400, margin: '0 auto', display: 'flex', justifyContent: 'space-between' }}>
-        <span style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim }}>
-          ConnectGo Ltd · ICO Registered · Dr Kate McAlpine, Director
-        </span>
-        <span style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim }}>
-          Confidential
-        </span>
-      </div>
-    </div>
-  )
+  const personOptions = useMemo(() => [...new Set(Object.values(data).flatMap(entry => entry?.items || []).flatMap(item => item.owner?.split(',').map(name => name.trim()) || []).filter(Boolean))].sort(), [data])
+  const scoped = useMemo(() => {
+    const onlyPerson = ownerOf(person)
+    const riskItems = (data.risks?.items || []).filter(onlyPerson)
+    const controlItems = (data.controls?.items || []).filter(onlyPerson)
+    const trackerItems = (data.tracker?.items || []).filter(onlyPerson)
+    const documentItems = (data.documents?.items || []).filter(onlyPerson)
+    return {
+      risks: { ...data.risks, total: riskItems.length, items: riskItems, byProbability: count(riskItems, 'probability', ['High', 'Medium', 'Low']), byCategory: count(riskItems, 'category', ['Open', 'Addressed', 'Closed']), byDomain: Object.fromEntries(Object.entries(data.risks?.byDomain || {}).map(([domain]) => [domain, riskItems.filter(item => item.domain === domain).length])) },
+      controls: { ...data.controls, total: controlItems.length, items: controlItems, byStatus: count(controlItems, 'status', ['Active', 'Partial', 'Planned', 'Not In Place']) },
+      tracker: { ...data.tracker, total: trackerItems.length, items: trackerItems, byStatus: count(trackerItems, 'status', ['Done', 'In Progress', 'To Do', 'Overdue', 'Skipped']), upcoming: trackerItems.filter(item => item.dueDate && !['Done', 'Skipped'].includes(item.status)).sort((left, right) => left.dueDate.localeCompare(right.dueDate)).slice(0, 5) },
+      documents: { ...data.documents, total: documentItems.length, items: documentItems, byStatus: Object.fromEntries(Object.keys(data.documents?.byStatus || {}).map(status => [status, documentItems.filter(item => item.status === status).length])) },
+    }
+  }, [data, person])
+  const tabs = [['overview', 'Overview'], ['tracker', 'Governance Tracker'], ['risks', 'Risk Register'], ['controls', 'Controls'], ['documents', 'Document Library']]
+  const open = (nextTab, nextFilter = 'all') => { setTab(nextTab); setFilter(nextFilter) }
+  const view = tab === 'overview' ? <Overview {...scoped} onOpen={open} /> : tab === 'tracker' ? <GovernanceTracker tracker={scoped.tracker} filter={filter} onFilter={setFilter} /> : tab === 'risks' ? <RiskRegister risks={scoped.risks} filter={filter} onFilter={setFilter} /> : tab === 'controls' ? <Controls controls={scoped.controls} filter={filter} onFilter={setFilter} /> : <DocumentLibrary documents={scoped.documents} filter={filter} onFilter={setFilter} />
+  return <><DashboardStyles /><main className="hub"><header className="site-header"><div className="brand"><h1>CONNECT<span>GO</span></h1><p>Governance &amp; Compliance</p></div><div className="header-actions">{synced && <small>Last sync · {synced.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</small>}<select value={person} onChange={event => setPerson(event.target.value)} aria-label="Filter by person"><option value="">All people</option>{personOptions.map(name => <option key={name} value={name}>{name}</option>)}</select></div></header><nav className="tab-nav" aria-label="Governance dashboard navigation">{tabs.map(([id, label]) => <button className={tab === id ? 'active' : ''} onClick={() => open(id)} key={id}>{label}</button>)}</nav><div className="content"><div className="eyebrow">{tabs.find(([id]) => id === tab)[1]} — ConnectGo Limited</div>{error ? <div className="notice">Could not load Notion data: {error}</div> : loading ? <div className="loading">Loading governance data from Notion...</div> : view}</div><footer className="site-footer">ConnectGo Ltd · Confidential</footer></main></>
 }
