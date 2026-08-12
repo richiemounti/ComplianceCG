@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 /* ── API helpers ─────────────────────────────────────────── */
 const get = key => fetch(`/.netlify/functions/notion?db=${key}`).then(async res => {
@@ -22,17 +22,13 @@ const statusTone = v =>
   ['Done','Active','Approved','Closed','In Place','Enabled'].includes(v) ? 'good'
   : ['High','Overdue','Not In Place','Not in place','Pending'].includes(v) ? 'critical'
   : 'attention'
-const ownerOf = person => item =>
-  !person || item.owner?.split(',').map(n => n.trim()).includes(person)
-
-// Deduplicate and normalise person names
-// "Dr Kate McAlpine" and "Kate McAlpine" should resolve to one person
-const normaliseName = n => n.replace(/^dr\s+/i,'').trim().toLowerCase()
+const displayName = name => name.replace(/^dr\s+/i,'').trim()
+const normaliseName = name => displayName(name).toLowerCase()
 const dedupeNames = names => {
   const seen = new Map()
-  for (const n of names) {
-    const key = normaliseName(n)
-    if (!seen.has(key)) seen.set(key, n) // keep first occurrence
+  for (const name of names) {
+    const key = normaliseName(name)
+    if (!seen.has(key)) seen.set(key, displayName(name))
   }
   return [...seen.values()].sort()
 }
@@ -196,53 +192,19 @@ function DomainRiskList({ risks }) {
   )
 }
 
-// Monthly Rhythm mini-section for Overview
-function MonthlyRhythmMini({ tracker }) {
-  const summaryTask = tracker.items.find(i => i.frequency === 'Monthly' && i.name?.toLowerCase().includes('risk summary'))
-  const sumaiyaTask = tracker.items.find(i => i.frequency === 'Monthly' && i.name?.toLowerCase().includes('nil return'))
-  const kateTask    = tracker.items.find(i => i.frequency === 'Monthly' && i.name?.toLowerCase().includes('review and respond'))
-  const isDone      = summaryTask?.status === 'Done'
-  const now         = new Date()
-  let overdueText   = ''
-  if (summaryTask?.dueDate && !isDone) {
-    const diff = Math.floor((now - new Date(summaryTask.dueDate)) / 86400000)
-    if (diff > 0) overdueText = ` · ${diff}d overdue`
-  }
-  const month = now.toLocaleString('en-GB', { month: 'long', year: 'numeric' })
-  return (
-    <div className="rhythm-mini">
-      <div className="rhythm-mini-label">{month} · Monthly risk summary</div>
-      <div className="rhythm-mini-status">
-        <span className={`mpill ${isDone ? 'mpill-good' : 'mpill-crit'}`}>Belinda: {isDone ? 'submitted' : `draft needed${overdueText}`}</span>
-        {kateTask && <span className={`mpill ${kateTask.status === 'Done' ? 'mpill-good' : 'mpill-warn'}`}>Kate: {kateTask.status === 'Done' ? 'responded' : 'awaiting'}</span>}
-        {sumaiyaTask && <span className={`mpill ${sumaiyaTask.status === 'Done' ? 'mpill-good' : 'mpill-warn'}`}>Sumaiya: {sumaiyaTask.status === 'Done' ? 'sent' : 'nil return pending'}</span>}
-      </div>
-      <div className="rhythm-mini-cycle">
-        {[{day:'3rd',who:'Sumaiya',task:sumaiyaTask},{day:'5th',who:'Belinda',task:summaryTask},{day:'10th',who:'Kate',task:kateTask}].map((s,i,a) => (
-          <span key={s.day} className="rhythm-step">
-            <span className={`rhythm-day ${s.task?.status === 'Done' ? 'rdone' : s.task?.status === 'Overdue' ? 'roverdue' : ''}`}>{s.day}</span>
-            <span className="rhythm-who">{s.who}</span>
-            {i < a.length - 1 && <span className="rhythm-arrow">→</span>}
-          </span>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 const WORKFLOWS = [
-  { id:'wf1',  num:'WF 1',  name:'New processing activity',         cadence:'Event-based', group:'event', trigger:'New data processing activity identified',       owner:'Belinda',            steps:'DPIA screening → RoPA entry → LIA if needed → DPA check',                                  notionUrl:'' },
-  { id:'wf2',  num:'WF 2',  name:'Data breach',                     cadence:'Event-based', group:'event', trigger:'Suspected or confirmed data breach',             owner:'Belinda + Kate',     steps:'Severity score → 72hr ICO clock → CFC notify → data subjects',                             notionUrl:'' },
-  { id:'wf3',  num:'WF 3',  name:'Monthly risk review',             cadence:'Monthly',     group:'sched', trigger:'5th of each month',                             owner:'Belinda → Kate',     steps:'Risk Register sweep → Controls check → Monthly Risk Summary → Kate review by 10th',        notionUrl:'' },
-  { id:'wf4',  num:'WF 4',  name:'Staff changes',                   cadence:'Event-based', group:'event', trigger:'New starter or leaver',                         owner:'Belinda',            steps:'Access provisioning → DBS check → NDA → training → offboarding checklist',                 notionUrl:'' },
-  { id:'wf5',  num:'WF 5',  name:'Annual compliance cycle',         cadence:'Annual',      group:'sched', trigger:'January each year',                             owner:'Belinda',            steps:'Full RoPA review → policy review → DPIA review → ICO horizon scan → SAT',                   notionUrl:'' },
-  { id:'wf6',  num:'WF 6',  name:'Client dependency monitoring',    cadence:'Monthly',     group:'sched', trigger:'1st of each month',                             owner:'Kate',               steps:'Update Revenue Concentration Tracker → quarterly review if threshold met',                   notionUrl:'' },
-  { id:'wf7',  num:'WF 7',  name:'Contract renewal & off-boarding', cadence:'Event-based', group:'event', trigger:'Contract end or 90-day flag',                   owner:'Kate + Belinda',     steps:'Data export → deletion confirmation → DPA closure → Kontainer export',                     notionUrl:'' },
-  { id:'wf8',  num:'WF 8',  name:'Reputational risk monitoring',    cadence:'Event-based', group:'event', trigger:'Press mention, complaint or incident',          owner:'Kate + Hannah',      steps:'Log in register → triage → response plan → ICO if applicable',                             notionUrl:'' },
-  { id:'wf9',  num:'WF 9',  name:'Due diligence readiness',         cadence:'Live now',    group:'live',  trigger:'Active — investment raise ongoing',             owner:'Kate + Belinda',     steps:'Pre-meeting checklist → Data Room audit → compliance narrative → investor update',          notionUrl:'' },
-  { id:'wf10', num:'WF 10', name:'Research safeguarding',           cadence:'Event-based', group:'event', trigger:'New research project with participants',         owner:'Sumaiya + Belinda',  steps:'Risk assessment → consent via Kontainer → DBS checks → field safety briefing',             notionUrl:'' },
-  { id:'wf11', num:'WF 11', name:'Staff & partner concerns',        cadence:'Event-based', group:'event', trigger:'Concern raised by staff or partner',            owner:'Sumaiya',            steps:'Triage → log in Safeguarding Register → escalate if needed → wellbeing support',           notionUrl:'' },
-  { id:'wf12', num:'WF 12', name:'Safeguarding governance',         cadence:'Quarterly',   group:'sched', trigger:'End of each quarter',                           owner:'Sumaiya',            steps:'Quarterly review → DBS renewal check → training refresh → annual audit Dec',              notionUrl:'' },
+  { id:'wf1',  num:'WF 1',  name:'New processing activity',         cadence:'Event-based', group:'event', trigger:'New data processing activity identified',       owner:'Belinda',            steps:'DPIA screening → RoPA entry → LIA if needed → DPA check' },
+  { id:'wf2',  num:'WF 2',  name:'Data breach',                     cadence:'Event-based', group:'event', trigger:'Suspected or confirmed data breach',             owner:'Belinda + Kate',     steps:'Severity score → 72hr ICO clock → CFC notify → data subjects' },
+  { id:'wf3',  num:'WF 3',  name:'Monthly risk review',             cadence:'Monthly',     group:'sched', trigger:'5th of each month',                             owner:'Belinda → Kate',     steps:'Risk Register sweep → Controls check → Monthly Risk Summary → Kate review by 10th' },
+  { id:'wf4',  num:'WF 4',  name:'Staff changes',                   cadence:'Event-based', group:'event', trigger:'New starter or leaver',                         owner:'Belinda',            steps:'Access provisioning → DBS check → NDA → training → offboarding checklist' },
+  { id:'wf5',  num:'WF 5',  name:'Annual compliance cycle',         cadence:'Annual',      group:'sched', trigger:'January each year',                             owner:'Belinda',            steps:'Full RoPA review → policy review → DPIA review → ICO horizon scan → SAT' },
+  { id:'wf6',  num:'WF 6',  name:'Client dependency monitoring',    cadence:'Monthly',     group:'sched', trigger:'1st of each month',                             owner:'Kate',               steps:'Update Revenue Concentration Tracker → quarterly review if threshold met' },
+  { id:'wf7',  num:'WF 7',  name:'Contract renewal & off-boarding', cadence:'Event-based', group:'event', trigger:'Contract end or 90-day flag',                   owner:'Kate + Belinda',     steps:'Data export → deletion confirmation → DPA closure → Kontainer export' },
+  { id:'wf8',  num:'WF 8',  name:'Reputational risk monitoring',    cadence:'Event-based', group:'event', trigger:'Press mention, complaint or incident',          owner:'Kate + Hannah',      steps:'Log in register → triage → response plan → ICO if applicable' },
+  { id:'wf9',  num:'WF 9',  name:'Due diligence readiness',         cadence:'Live now',    group:'live',  trigger:'Active — investment raise ongoing',             owner:'Kate + Belinda',     steps:'Pre-meeting checklist → Data Room audit → compliance narrative → investor update' },
+  { id:'wf10', num:'WF 10', name:'Research safeguarding',           cadence:'Event-based', group:'event', trigger:'New research project with participants',         owner:'Sumaiya + Belinda',  steps:'Risk assessment → consent via Kontainer → DBS checks → field safety briefing' },
+  { id:'wf11', num:'WF 11', name:'Staff & partner concerns',        cadence:'Event-based', group:'event', trigger:'Concern raised by staff or partner',            owner:'Sumaiya',            steps:'Triage → log in Safeguarding Register → escalate if needed → wellbeing support' },
+  { id:'wf12', num:'WF 12', name:'Safeguarding governance',         cadence:'Quarterly',   group:'sched', trigger:'End of each quarter',                           owner:'Sumaiya',            steps:'Quarterly review → DBS renewal check → training refresh → annual audit Dec' },
 ]
 
 const WF_GROUPS = [
@@ -276,9 +238,6 @@ function WorkflowsAccordion() {
                         <div><div className="wfd-lbl">Owner</div><div className="wfd-val">{wf.owner}</div></div>
                         <div><div className="wfd-lbl">Key steps</div><div className="wfd-val">{wf.steps}</div></div>
                       </div>
-                      {wf.notionUrl
-                        ? <a href={wf.notionUrl} target="_blank" rel="noreferrer" className="wf-notion-link">Open in Notion ↗</a>
-                        : <span className="wf-notion-link" style={{color:'#bbb',cursor:'default'}}>Notion link — add to WORKFLOWS array</span>}
                     </div>
                   )}
                 </div>
@@ -308,7 +267,6 @@ function Overview({ risks, controls, tracker, onOpen }) {
     .slice(0,8)
   return (
     <>
-      <MonthlyRhythmMini tracker={tracker} />
       <MetricBand metrics={metrics} />
       <div className="two-columns">
         <Panel title="Risk Register — By Domain" source="Unified Risk Register">
@@ -727,22 +685,6 @@ function DashboardStyles() {
     .content { margin: 0 auto; max-width: 1500px; padding: 31px 4rem 52px; }
     .eyebrow { border-bottom: 1px solid #d8dfd9; color: #486058; font-size: 11px; font-weight: 600; letter-spacing: .12em; margin-bottom: 20px; padding-bottom: 14px; text-transform: uppercase; }
 
-    /* monthly rhythm mini */
-    .rhythm-mini { background: #17332d; margin-bottom: 20px; padding: 12px 20px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
-    .rhythm-mini-label { color: rgba(255,255,255,.4); font-size: 9px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; flex-shrink: 0; }
-    .rhythm-mini-status { display: flex; gap: 6px; flex-shrink: 0; }
-    .rhythm-mini-cycle { display: flex; align-items: center; gap: 4px; margin-left: auto; }
-    .rhythm-step { align-items: center; display: flex; gap: 4px; }
-    .rhythm-day { background: rgba(255,255,255,.1); border-radius: 0; color: #fff; font-size: 10px; font-weight: 600; padding: 3px 7px; }
-    .rhythm-day.rdone { background: rgba(62,126,86,.3); color: #a8d6b5; }
-    .rhythm-day.roverdue { background: rgba(172,72,61,.3); color: #f1b0a8; }
-    .rhythm-who { color: rgba(255,255,255,.45); font-size: 10px; }
-    .rhythm-arrow { color: rgba(255,255,255,.25); font-size: 12px; padding: 0 2px; }
-    .mpill { border-radius: 0; font-size: 9px; font-weight: 600; letter-spacing: .06em; padding: 4px 9px; text-transform: uppercase; }
-    .mpill-crit { background: rgba(172,72,61,.35); border: 1px solid rgba(172,72,61,.4); color: #f0a0a0; }
-    .mpill-warn { background: rgba(163,108,36,.25); border: 1px solid rgba(163,108,36,.35); color: #f0c060; }
-    .mpill-good { background: rgba(62,126,86,.25); border: 1px solid rgba(62,126,86,.35); color: #a8d6b5; }
-
     /* metric band */
     .metric-band { background: #17332d; display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); margin-bottom: 20px; }
     .metric-band button { background: transparent; border: 0; border-left: 1px solid rgba(255,255,255,.14); color: #fff; min-height: 104px; padding: 19px 20px; text-align: left; }
@@ -908,9 +850,6 @@ function DashboardStyles() {
     .wf-detail-grid > div { flex: 1; min-width: 100px; }
     .wfd-lbl { color: #839089; font-size: 9px; font-weight: 600; letter-spacing: .08em; margin-bottom: 3px; text-transform: uppercase; }
     .wfd-val { color: #19332d; font-size: 11px; }
-    .wf-notion-link { color: #a56624; display: inline-block; font-size: 10px; font-weight: 600; margin-top: 8px; text-decoration: none; }
-    .wf-notion-link:hover { text-decoration: underline; }
-
     /* IT tools retired section */
     .retired-section { border-top: 1px solid #e4e9e6; margin-top: 12px; padding-top: 4px; }
     .retired-toggle { align-items: center; background: transparent; border: 0; color: #839089; display: flex; font-size: 10px; font-weight: 600; gap: 8px; justify-content: space-between; letter-spacing: .06em; padding: 8px 0; text-transform: uppercase; width: 100%; }
@@ -945,8 +884,6 @@ function DashboardStyles() {
       .state-band div { border-top-color: #dde5df; }
       .panel { padding: 0 14px 14px; }
       .panel-heading span { display: none; }
-      .rhythm-mini { flex-direction: column; align-items: flex-start; gap: 8px; }
-      .rhythm-mini-cycle { margin-left: 0; }
       footer.site-footer { margin: 0 16px; }
     }
   `}</style>
@@ -958,7 +895,7 @@ function DashboardStyles() {
 export default function Dashboard() {
   const [tab,    setTab]    = useState('overview')
   const [filter, setFilter] = useState('all')
-  const [person, setPerson] = useState('')
+  const [person, setPerson] = useState('Kate McAlpine')
   const [data,   setData]   = useState({})
   const [error,  setError]  = useState('')
   const [loading,setLoading]= useState(true)
@@ -979,7 +916,8 @@ export default function Dashboard() {
   // Deduplicated person list — no duplicates from "Dr Kate McAlpine" vs "Kate McAlpine"
   const personOptions = useMemo(() => {
     const raw = Object.values(data).flatMap(e => e?.items||[]).flatMap(i => i.owner?.split(',').map(n=>n.trim())||[]).filter(Boolean)
-    return dedupeNames(raw)
+    const names = dedupeNames(raw)
+    return names.includes('Kate McAlpine') ? names : ['Kate McAlpine', ...names]
   }, [data])
 
   const scoped = useMemo(() => {
