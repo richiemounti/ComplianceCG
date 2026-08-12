@@ -468,7 +468,7 @@ function RiskRegister({ risks, filter, onFilter }) {
   return (
     <>
       <FilterBar value={filter} onChange={onFilter} options={[['all','All risks'],['high','High probability'],['open','Open risks']]} />
-      <div className="two-columns">
+      <div className="risk-top-grid">
         <Panel title="Risk Register — By Domain" source="Unified Risk Register">
           <div className="bars">
             {Object.entries(risks.byDomain || {}).filter(([,v]) => v).map(([label, value]) => (
@@ -480,8 +480,20 @@ function RiskRegister({ risks, filter, onFilter }) {
             ))}
           </div>
         </Panel>
-        <Panel title="High Probability" source="Unified Risk Register">
-          <TaskRows items={risks.items.filter(i => i.probability === 'High').map(i => ({ ...i, activityId: i.riskId, dueDate: i.reviewDate, status: i.controlStatus }))} />
+        <Panel title="High Probability Risks" source="Unified Risk Register">
+          <div className="rows">
+            {risks.items.filter(i => i.probability === 'High').length
+              ? risks.items.filter(i => i.probability === 'High').map(i => (
+                  <div className="row" key={i.id}>
+                    <div>
+                      <NotionLink item={i}>{i.riskId ? `${i.riskId} · ` : ''}{i.name}</NotionLink>
+                      <p>{i.domain || '—'} · {i.owner || '—'}</p>
+                    </div>
+                    <Badge>{i.controlStatus || i.category || '—'}</Badge>
+                  </div>
+                ))
+              : <p className="empty">No high probability risks</p>}
+          </div>
         </Panel>
       </div>
       <Panel title="Risk Register — Records" source="Unified Risk Register">
@@ -854,11 +866,13 @@ function DashboardStyles() {
     .metric-band strong.good { color: #a8d6b5; }
 
     /* layout */
-    .two-columns { display: grid; gap: 16px; grid-template-columns: minmax(0,1.1fr) minmax(300px,.9fr); margin-bottom: 20px; }
+    .two-columns { display: grid; gap: 16px; grid-template-columns: minmax(0,1.1fr) minmax(300px,.9fr); margin-bottom: 20px; align-items: start; }
 
     /* panels */
     .panel { background: #fffdf8; border: 1px solid #dbe3dd; border-top: 3px solid #31594f; margin-bottom: 20px; min-width: 0; padding: 0 20px 16px; }
     .two-columns .panel { margin-bottom: 0; }
+    .risk-top-grid { display: grid; gap: 16px; grid-template-columns: minmax(0,1.1fr) minmax(300px,.9fr); margin-bottom: 20px; align-items: start; }
+    .risk-top-grid .panel { margin-bottom: 0; }
     .panel-heading { align-items: center; border-bottom: 1px solid #e0e6e1; display: flex; justify-content: space-between; margin-bottom: 8px; padding: 15px 0 12px; }
     .panel-heading h2 { font-size: 12px; letter-spacing: .08em; margin: 0; text-transform: uppercase; }
     .panel-heading span { border-bottom: 1px solid #bfd0c7; color: #547168; font-size: 9px; font-weight: 600; letter-spacing: .08em; padding-bottom: 2px; text-transform: uppercase; }
