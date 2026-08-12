@@ -204,97 +204,152 @@ function MonthlySummaryBanner({ tracker }) {
   )
 }
 
+/* Collapsible domain risk list — used in Overview */
+function DomainRiskList({ risks }) {
+  const [openDomain, setOpenDomain] = useState(null)
+  const domains = Object.entries(risks.byDomain || {}).filter(([, v]) => v)
+  const toggle = d => setOpenDomain(prev => prev === d ? null : d)
+  return (
+    <div className="domain-list">
+      {domains.map(([label, value]) => {
+        const isOpen = openDomain === label
+        const domainRisks = risks.items.filter(i => i.domain === label)
+        return (
+          <div key={label} className="domain-item">
+            <button type="button" className="domain-row" onClick={() => toggle(label)}>
+              <span className="domain-name">{label}</span>
+              <i className="domain-bar-track"><em style={{ width: `${risks.total ? value / risks.total * 100 : 0}%` }} /></i>
+              <b className="domain-count">{value}</b>
+              <span className={`wf-chev${isOpen ? ' open' : ''}`}>⌄</span>
+            </button>
+            {isOpen && (
+              <div className="domain-risks">
+                {domainRisks.map(r => (
+                  <div className="domain-risk-row" key={r.id}>
+                    <NotionLink item={r}>{r.riskId ? `${r.riskId} · ` : ''}{r.name}</NotionLink>
+                    <div className="domain-risk-meta">
+                      <Badge>{r.probability}</Badge>
+                      <Badge>{r.controlStatus || r.category || '—'}</Badge>
+                      <span>{r.owner || '—'}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function Overview({ risks, controls, tracker, onOpen }) {
-  const active = controls.byStatus.Active || 0
+  const active    = controls.byStatus.Active || 0
   const available = tracker.total - (tracker.byStatus.Skipped || 0)
 
   const metrics = [
-    { label: 'Total risks',       value: risks.total,                                                          onClick: () => onOpen('risks', 'all') },
-    { label: 'High probability',  value: risks.byProbability.High || 0,      tone: 'critical',                 onClick: () => onOpen('risks', 'high') },
-    { label: 'Open risks',        value: risks.byCategory.Open || 0,         tone: 'attention',                onClick: () => onOpen('risks', 'open') },
-    { label: 'Controls active',   value: `${controls.total ? Math.round(active / controls.total * 100) : 0}%`, onClick: () => onOpen('controls', 'Active') },
-    { label: 'Activities done',   value: `${available ? Math.round((tracker.byStatus.Done || 0) / available * 100) : 0}%`, tone: 'good', onClick: () => onOpen('tracker', 'Done') },
-    { label: 'Overdue',           value: tracker.byStatus.Overdue || 0,      tone: 'critical',                 onClick: () => onOpen('tracker', 'Overdue') },
+    { label: 'Total risks',      value: risks.total,                                                           onClick: () => onOpen('risks', 'all') },
+    { label: 'High probability', value: risks.byProbability.High || 0,       tone: 'critical',                 onClick: () => onOpen('risks', 'high') },
+    { label: 'Open risks',       value: risks.byCategory.Open || 0,          tone: 'attention',                onClick: () => onOpen('risks', 'open') },
+    { label: 'Controls active',  value: `${controls.total ? Math.round(active / controls.total * 100) : 0}%`, onClick: () => onOpen('controls', 'all') },
+    { label: 'Activities done',  value: `${available ? Math.round((tracker.byStatus.Done || 0) / available * 100) : 0}%`, tone: 'good', onClick: () => onOpen('actions', 'Done') },
+    { label: 'Overdue',          value: tracker.byStatus.Overdue || 0,       tone: 'critical',                 onClick: () => onOpen('actions', 'Overdue') },
   ]
 
-  const domains = Object.entries(risks.byDomain || {}).filter(([, v]) => v)
-
-  // Recurring tasks for the right-hand panel
+  // Only true recurring tasks — Monthly / Quarterly / Annual
+  const RECURRING_FREQUENCIES = ['Monthly', 'Quarterly', 'Annual', 'Annually']
   const recurring = tracker.items
-    .filter(i => i.frequency && !['Done', 'Skipped'].includes(i.status))
+    .filter(i => i.frequency && RECURRING_FREQUENCIES.includes(i.frequency) && !['Done', 'Skipped'].includes(i.status))
     .sort((a, b) => (a.dueDate || '9999').localeCompare(b.dueDate || '9999'))
     .slice(0, 8)
 
   return (
     <>
-      <MonthlySummaryBanner tracker={tracker} />
       <MetricBand metrics={metrics} />
-
-      {/* Domain status + Recurring tasks */}
       <div className="two-columns">
         <Panel title="Risk Register — By Domain" source="Unified Risk Register">
-          <div className="bars">
-            {domains.map(([label, value]) => (
-              <button type="button" key={label} onClick={() => onOpen('risks', 'all')}>
-                <span>{label}</span>
-                <i><em style={{ width: `${risks.total ? value / risks.total * 100 : 0}%` }} /></i>
-                <b>{value}</b>
-              </button>
-            ))}
-          </div>
+          <DomainRiskList risks={risks} />
         </Panel>
         <Panel title="Recurring Governance Tasks" source="Governance Tracker">
           <TaskRows items={recurring} />
         </Panel>
       </div>
-
-      {/* Workflows accordion */}
       <WorkflowsAccordion />
     </>
   )
 }
 
+// TODO Sam: add notionUrl for each workflow — the Notion page URL from the compliance hub
 const WORKFLOWS = [
-  { id: 'wf1',  num: 'WF 1',  name: 'New processing activity',       cadence: 'Event-based', trigger: 'New data processing activity identified',         owner: 'Belinda',          steps: 'DPIA screening → RoPA entry → LIA if needed → DPA check' },
-  { id: 'wf2',  num: 'WF 2',  name: 'Data breach',                   cadence: 'Event-based', trigger: 'Suspected or confirmed data breach',               owner: 'Belinda + Kate',   steps: 'Severity score → 72hr ICO clock → CFC notify → data subjects' },
-  { id: 'wf3',  num: 'WF 3',  name: 'Monthly risk review',           cadence: 'Monthly',     trigger: '5th of each month',                               owner: 'Belinda → Kate',   steps: 'Risk Register sweep → Controls check → Monthly Risk Summary → Kate review by 10th' },
-  { id: 'wf4',  num: 'WF 4',  name: 'Staff changes',                 cadence: 'Event-based', trigger: 'New starter or leaver',                           owner: 'Belinda',          steps: 'Access provisioning → DBS check → NDA → training → offboarding checklist' },
-  { id: 'wf5',  num: 'WF 5',  name: 'Annual compliance cycle',       cadence: 'Annual',      trigger: 'January each year',                               owner: 'Belinda',          steps: 'Full RoPA review → policy review → DPIA review → ICO horizon scan → SAT' },
-  { id: 'wf6',  num: 'WF 6',  name: 'Client dependency monitoring',  cadence: 'Monthly',     trigger: '1st of each month',                               owner: 'Kate',             steps: 'Update Revenue Concentration Tracker → quarterly review if threshold met' },
-  { id: 'wf7',  num: 'WF 7',  name: 'Contract renewal & off-boarding', cadence: 'Event-based', trigger: 'Contract end or 90-day flag',                   owner: 'Kate + Belinda',   steps: 'Data export → deletion confirmation → DPA closure → Kontainer export' },
-  { id: 'wf8',  num: 'WF 8',  name: 'Reputational risk monitoring',  cadence: 'Event-based', trigger: 'Press mention, complaint or incident',            owner: 'Kate + Hannah',    steps: 'Log in register → triage → response plan → ICO if applicable' },
-  { id: 'wf9',  num: 'WF 9',  name: 'Due diligence readiness',       cadence: 'Live now',    trigger: 'Active — investment raise ongoing',               owner: 'Kate + Belinda',   steps: 'Pre-meeting checklist → Data Room audit → compliance narrative → investor update' },
-  { id: 'wf10', num: 'WF 10', name: 'Research safeguarding',         cadence: 'Event-based', trigger: 'New research project with participants',           owner: 'Sumaiya + Belinda', steps: 'Risk assessment → consent via Kontainer → DBS checks → field safety briefing' },
-  { id: 'wf11', num: 'WF 11', name: 'Staff & partner concerns',      cadence: 'Event-based', trigger: 'Concern raised by staff or partner',              owner: 'Sumaiya',          steps: 'Triage → log in Safeguarding Register → escalate if needed → wellbeing support' },
-  { id: 'wf12', num: 'WF 12', name: 'Safeguarding governance',       cadence: 'Quarterly',   trigger: 'End of each quarter',                             owner: 'Sumaiya',          steps: 'Quarterly review → DBS renewal check → training refresh → annual audit Dec' },
+  { id: 'wf1',  num: 'WF 1',  name: 'New processing activity',         cadence: 'Event-based', trigger: 'New data processing activity identified',       owner: 'Belinda',           steps: 'DPIA screening → RoPA entry → LIA if needed → DPA check',                                         notionUrl: '' },
+  { id: 'wf2',  num: 'WF 2',  name: 'Data breach',                     cadence: 'Event-based', trigger: 'Suspected or confirmed data breach',             owner: 'Belinda + Kate',    steps: 'Severity score → 72hr ICO clock → CFC notify → data subjects',                                    notionUrl: '' },
+  { id: 'wf3',  num: 'WF 3',  name: 'Monthly risk review',             cadence: 'Monthly',     trigger: '5th of each month',                             owner: 'Belinda → Kate',    steps: 'Risk Register sweep → Controls check → Monthly Risk Summary → Kate review by 10th',               notionUrl: '' },
+  { id: 'wf4',  num: 'WF 4',  name: 'Staff changes',                   cadence: 'Event-based', trigger: 'New starter or leaver',                         owner: 'Belinda',           steps: 'Access provisioning → DBS check → NDA → training → offboarding checklist',                        notionUrl: '' },
+  { id: 'wf5',  num: 'WF 5',  name: 'Annual compliance cycle',         cadence: 'Annual',      trigger: 'January each year',                             owner: 'Belinda',           steps: 'Full RoPA review → policy review → DPIA review → ICO horizon scan → SAT',                          notionUrl: '' },
+  { id: 'wf6',  num: 'WF 6',  name: 'Client dependency monitoring',    cadence: 'Monthly',     trigger: '1st of each month',                             owner: 'Kate',              steps: 'Update Revenue Concentration Tracker → quarterly review if threshold met',                          notionUrl: '' },
+  { id: 'wf7',  num: 'WF 7',  name: 'Contract renewal & off-boarding', cadence: 'Event-based', trigger: 'Contract end or 90-day flag',                   owner: 'Kate + Belinda',    steps: 'Data export → deletion confirmation → DPA closure → Kontainer export',                            notionUrl: '' },
+  { id: 'wf8',  num: 'WF 8',  name: 'Reputational risk monitoring',    cadence: 'Event-based', trigger: 'Press mention, complaint or incident',          owner: 'Kate + Hannah',     steps: 'Log in register → triage → response plan → ICO if applicable',                                    notionUrl: '' },
+  { id: 'wf9',  num: 'WF 9',  name: 'Due diligence readiness',         cadence: 'Live now',    trigger: 'Active — investment raise ongoing',             owner: 'Kate + Belinda',    steps: 'Pre-meeting checklist → Data Room audit → compliance narrative → investor update',                 notionUrl: '' },
+  { id: 'wf10', num: 'WF 10', name: 'Research safeguarding',           cadence: 'Event-based', trigger: 'New research project with participants',         owner: 'Sumaiya + Belinda', steps: 'Risk assessment → consent via Kontainer → DBS checks → field safety briefing',                    notionUrl: '' },
+  { id: 'wf11', num: 'WF 11', name: 'Staff & partner concerns',        cadence: 'Event-based', trigger: 'Concern raised by staff or partner',            owner: 'Sumaiya',           steps: 'Triage → log in Safeguarding Register → escalate if needed → wellbeing support',                  notionUrl: '' },
+  { id: 'wf12', num: 'WF 12', name: 'Safeguarding governance',         cadence: 'Quarterly',   trigger: 'End of each quarter',                           owner: 'Sumaiya',           steps: 'Quarterly review → DBS renewal check → training refresh → annual audit Dec',                       notionUrl: '' },
+]
+
+const WF_GROUPS = [
+  {
+    group: 'Scheduled — runs on a fixed cycle',
+    workflows: ['wf3', 'wf5', 'wf6', 'wf12'],
+  },
+  {
+    group: 'Event-based — triggered when something happens',
+    workflows: ['wf1', 'wf2', 'wf4', 'wf7', 'wf8', 'wf10', 'wf11'],
+  },
+  {
+    group: 'Active now',
+    workflows: ['wf9'],
+  },
 ]
 
 function WorkflowsAccordion() {
   const [open, setOpen] = useState(null)
   const toggle = id => setOpen(prev => prev === id ? null : id)
+  const wfMap = Object.fromEntries(WORKFLOWS.map(w => [w.id, w]))
   return (
     <Panel title="Workflows" source="">
-      <div className="wf-list">
-        {WORKFLOWS.map(wf => (
-          <div key={wf.id} className="wf-item">
-            <button type="button" className="wf-row" onClick={() => toggle(wf.id)}>
-              <span className="wf-num">{wf.num}</span>
-              <span className="wf-name">{wf.name}</span>
-              <span className={`wf-cadence cadence-${wf.cadence.toLowerCase().replace(/\s/g,'-')}`}>{wf.cadence}</span>
-              <span className={`wf-chev${open === wf.id ? ' open' : ''}`}>⌄</span>
-            </button>
-            {open === wf.id && (
-              <div className="wf-detail">
-                <div className="wf-detail-grid">
-                  <div><div className="wfd-lbl">Trigger</div><div className="wfd-val">{wf.trigger}</div></div>
-                  <div><div className="wfd-lbl">Owner</div><div className="wfd-val">{wf.owner}</div></div>
-                  <div><div className="wfd-lbl">Key steps</div><div className="wfd-val">{wf.steps}</div></div>
-                </div>
+      {WF_GROUPS.map(group => (
+        <div key={group.group} className="wf-group">
+          <div className="wf-group-label">{group.group}</div>
+          {group.workflows.map(id => {
+            const wf = wfMap[id]
+            if (!wf) return null
+            const isOpen = open === wf.id
+            return (
+              <div key={wf.id} className="wf-item">
+                <button type="button" className="wf-row" onClick={() => toggle(wf.id)}>
+                  <span className="wf-num">{wf.num}</span>
+                  <span className="wf-name">{wf.name}</span>
+                  <span className={`wf-cadence cadence-${wf.cadence.toLowerCase().replace(/\s/g,'-')}`}>{wf.cadence}</span>
+                  <span className={`wf-chev${isOpen ? ' open' : ''}`}>⌄</span>
+                </button>
+                {isOpen && (
+                  <div className="wf-detail">
+                    <div className="wf-detail-grid">
+                      <div><div className="wfd-lbl">Trigger</div><div className="wfd-val">{wf.trigger}</div></div>
+                      <div><div className="wfd-lbl">Owner</div><div className="wfd-val">{wf.owner}</div></div>
+                      <div><div className="wfd-lbl">Key steps</div><div className="wfd-val">{wf.steps}</div></div>
+                    </div>
+                    {wf.notionUrl && (
+                      <a href={wf.notionUrl} target="_blank" rel="noreferrer" className="wf-notion-link">
+                        Open in Notion ↗
+                      </a>
+                    )}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        ))}
-      </div>
+            )
+          })}
+        </div>
+      ))}
     </Panel>
   )
 }
@@ -460,42 +515,41 @@ function CalendarView({ tracker }) {
    RISK REGISTER
    ════════════════════════════════════════════════════════ */
 function RiskRegister({ risks, filter, onFilter }) {
-  const rows = risks.items.filter(item =>
-    filter === 'all' ||
-    (filter === 'high' && item.probability === 'High') ||
-    (filter === 'open' && item.category === 'Open')
-  )
+  const [domainFilter, setDomainFilter] = useState(null)
+  const rows = risks.items.filter(item => {
+    const matchesDomain = !domainFilter || item.domain === domainFilter
+    const matchesFilter =
+      filter === 'all' ||
+      (filter === 'high' && item.probability === 'High') ||
+      (filter === 'open' && item.category === 'Open')
+    return matchesDomain && matchesFilter
+  })
+  const toggleDomain = d => setDomainFilter(prev => prev === d ? null : d)
   return (
     <>
-      <FilterBar value={filter} onChange={onFilter} options={[['all','All risks'],['high','High probability'],['open','Open risks']]} />
-      <div className="risk-top-grid">
-        <Panel title="Risk Register — By Domain" source="Unified Risk Register">
-          <div className="bars">
-            {Object.entries(risks.byDomain || {}).filter(([,v]) => v).map(([label, value]) => (
-              <div key={label}>
-                <span>{label}</span>
-                <i><em style={{ width: `${risks.total ? value / risks.total * 100 : 0}%` }} /></i>
-                <b>{value}</b>
-              </div>
-            ))}
+      <FilterBar value={filter} onChange={f => { onFilter(f); setDomainFilter(null) }} options={[['all','All risks'],['high','High probability'],['open','Open risks']]} />
+      <Panel title="Risk Register — By Domain" source="Unified Risk Register">
+        <div className="bars">
+          {Object.entries(risks.byDomain || {}).filter(([,v]) => v).map(([label, value]) => (
+            <button
+              type="button"
+              key={label}
+              onClick={() => toggleDomain(label)}
+              className={domainFilter === label ? 'bar-active' : ''}
+            >
+              <span>{label}</span>
+              <i><em style={{ width: `${risks.total ? value / risks.total * 100 : 0}%` }} /></i>
+              <b>{value}</b>
+            </button>
+          ))}
+        </div>
+        {domainFilter && (
+          <div className="domain-active-label">
+            Showing {domainFilter} risks
+            <button type="button" className="domain-clear" onClick={() => setDomainFilter(null)}>✕ Clear</button>
           </div>
-        </Panel>
-        <Panel title="High Probability Risks" source="Unified Risk Register">
-          <div className="rows">
-            {risks.items.filter(i => i.probability === 'High').length
-              ? risks.items.filter(i => i.probability === 'High').map(i => (
-                  <div className="row" key={i.id}>
-                    <div>
-                      <NotionLink item={i}>{i.riskId ? `${i.riskId} · ` : ''}{i.name}</NotionLink>
-                      <p>{i.domain || '—'} · {i.owner || '—'}</p>
-                    </div>
-                    <Badge>{i.controlStatus || i.category || '—'}</Badge>
-                  </div>
-                ))
-              : <p className="empty">No high probability risks</p>}
-          </div>
-        </Panel>
-      </div>
+        )}
+      </Panel>
       <Panel title="Risk Register — Records" source="Unified Risk Register">
         <Pager items={rows}>
           {visible => (
@@ -987,8 +1041,32 @@ function DashboardStyles() {
     .ce-b { background: #e3edf5; color: #3a6480; }
     .cal-more { color: #839089; font-size: 9px; padding: 1px 4px; }
 
-    /* workflows */
-    .wf-list { }
+    /* domain collapsible list (overview) */
+    .domain-list { }
+    .domain-item { border-bottom: 1px solid #e4e9e6; }
+    .domain-item:last-child { border-bottom: 0; }
+    .domain-row { align-items: center; background: transparent; border: 0; display: grid; gap: 12px; grid-template-columns: minmax(100px,1fr) minmax(100px,2fr) 28px 18px; padding: 12px 4px; text-align: left; width: 100%; cursor: pointer; }
+    .domain-row:hover { background: #f4f8f4; padding-left: 7px; }
+    .domain-name { font-size: 12px; font-weight: 600; }
+    .domain-bar-track { background: #e4eae6; height: 5px; }
+    .domain-bar-track em { background: #31594f; display: block; height: 100%; }
+    .domain-count { font-size: 12px; text-align: right; }
+    .domain-risks { background: #f7faf7; border-top: 1px solid #e4e9e6; padding: 8px 12px 8px 20px; }
+    .domain-risk-row { align-items: center; border-bottom: 1px dashed #e4e9e6; display: flex; gap: 10px; justify-content: space-between; padding: 8px 0; }
+    .domain-risk-row:last-child { border-bottom: 0; }
+    .domain-risk-meta { align-items: center; display: flex; gap: 6px; flex-shrink: 0; }
+    .domain-risk-meta span { color: #839089; font-size: 10px; }
+
+    /* bar active state */
+    .bars > button.bar-active { background: #eef4ee; }
+    .domain-active-label { align-items: center; border-top: 1px solid #e4e9e6; color: #486058; display: flex; font-size: 10px; font-weight: 600; gap: 10px; justify-content: space-between; letter-spacing: .05em; padding: 8px 4px; text-transform: uppercase; }
+    .domain-clear { background: transparent; border: 1px solid #ced8d2; color: #60726b; font-size: 10px; padding: 3px 8px; }
+    .domain-clear:hover { background: #31594f; border-color: #31594f; color: #fff; }
+
+    /* workflow groups */
+    .wf-group { margin-bottom: 4px; }
+    .wf-group-label { color: #839089; font-size: 9px; font-weight: 600; letter-spacing: .09em; margin: 14px 0 6px; text-transform: uppercase; }
+    .wf-group:first-child .wf-group-label { margin-top: 4px; }
     .wf-item { border-bottom: 1px solid #e4e9e6; }
     .wf-item:last-child { border-bottom: 0; }
     .wf-row { align-items: center; background: transparent; border: 0; display: flex; gap: 10px; padding: 10px 4px; text-align: left; width: 100%; }
@@ -1005,6 +1083,8 @@ function DashboardStyles() {
     .wf-detail-grid > div { flex: 1; min-width: 120px; }
     .wfd-lbl { color: #839089; font-size: 9px; font-weight: 600; letter-spacing: .08em; margin-bottom: 4px; text-transform: uppercase; }
     .wfd-val { color: #19332d; font-size: 11px; }
+    .wf-notion-link { color: #a56624; display: inline-block; font-size: 10px; font-weight: 600; margin-top: 10px; text-decoration: none; }
+    .wf-notion-link:hover { text-decoration: underline; }
 
     /* monthly rhythm */
     .rr-list { }
