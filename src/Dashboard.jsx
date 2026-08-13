@@ -45,9 +45,9 @@ function Badge({ children }) {
 function NotionLink({ item, children }) {
   return <a className="notion-link" href={item.url} target="_blank" rel="noreferrer">{children}<span aria-hidden="true">↗</span></a>
 }
-function Panel({ title, source, children }) {
+function Panel({ title, source, children, className = '' }) {
   return (
-    <section className="panel">
+    <section className={`panel ${className}`}>
       <header className="panel-heading"><h2>{title}</h2>{source && <span>{source}</span>}</header>
       {children}
     </section>
@@ -87,26 +87,39 @@ function SearchBox({ value, onChange, placeholder }) {
     </div>
   )
 }
-// Scrollable table wrapper — no pager, just a scrollable div capped at maxRows visible
-function ScrollTable({ items, head, row: RowFn, maxRows = 12 }) {
-  const rowH = 48 // px per row (matches .table-row min-height)
-  const headH = 34
-  const maxH = headH + rowH * maxRows
-  const needsScroll = items.length > maxRows
+// Tables show ten records per page; wide tables can still scroll horizontally.
+function ScrollTable({ items, head, row: RowFn, pageSize = 10, minWidth = 810, columns }) {
+  const [page, setPage] = useState(1)
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize))
+  const currentPage = Math.min(page, pageCount)
+  const start = (currentPage - 1) * pageSize
+  const pageItems = items.slice(start, start + pageSize)
+
+  useEffect(() => { setPage(1) }, [items])
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount)
+  }, [page, pageCount])
+
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <div
-        style={{
-          maxHeight: needsScroll ? `${maxH}px` : undefined,
-          overflowY: needsScroll ? 'auto' : undefined,
-        }}
-        className="scroll-table-body"
-      >
-        <div className="data-table" style={{ minWidth: 810 }}>
+    <div className="table-wrap">
+      <div className="table-scroll">
+        <div className="data-table" style={{ minWidth, '--table-columns': columns }}>
           <div className="table-head">{head}</div>
-          {items.length ? items.map(RowFn) : <div className="table-row" style={{ gridColumn: '1/-1', color: '#8a9690', fontSize: 11 }}>No matching records</div>}
+          {items.length ? pageItems.map(RowFn) : <div className="table-row" style={{ gridColumn: '1/-1', color: '#8a9690', fontSize: 11 }}>No matching records</div>}
         </div>
       </div>
+      {items.length > pageSize && (
+        <nav className="table-pagination" aria-label="Table pages">
+          <span>Showing {start + 1}–{Math.min(start + pageSize, items.length)} of {items.length}</span>
+          <div className="page-controls">
+            <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage === 1} aria-label="Previous page">‹</button>
+            {Array.from({ length: pageCount }, (_, index) => index + 1).map(number => (
+              <button type="button" key={number} className={number === currentPage ? 'current' : ''} onClick={() => setPage(number)} aria-current={number === currentPage ? 'page' : undefined}>{number}</button>
+            ))}
+            <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage === pageCount} aria-label="Next page">›</button>
+          </div>
+        </nav>
+      )}
     </div>
   )
 }
@@ -219,8 +232,8 @@ const WF_GROUPS = [
 function WorkflowsAccordion() {
   const [open, setOpen] = useState(null)
   return (
-    <Panel title="Workflows" source="">
-      <div className="wf-two-col">
+    <Panel title="Workflows" source="" className="workflow-panel">
+      <div className="workflow-groups">
         {WF_GROUPS.map(g => (
           <div key={g.key} className="wf-group-col">
             <div className="wf-group-label">{g.label}</div>
@@ -425,16 +438,21 @@ function RiskRegister({ risks, filter, onFilter }) {
       <Panel title="Risk Register — Records" source={`Unified Risk Register${rows.length!==risks.total?` · ${rows.length} shown`:''}`}>
         <ScrollTable
           items={rows}
-          head={<><span>Risk</span><span>Domain</span><span>Probability</span><span>Impact</span><span>Control status</span><span>Risk category</span><span>Risk owner</span></>}
+          minWidth={1700}
+          columns="68px minmax(240px,2.1fr) minmax(120px,1fr) minmax(120px,1fr) 100px minmax(140px,1.1fr) minmax(130px,1fr) minmax(130px,1fr) 110px 130px"
+          head={<><span>{risks.columns?.riskId || 'Risk ID'}</span><span>{risks.columns?.title || 'Risk'}</span><span>{risks.columns?.owner || 'Risk Owner'}</span><span>{risks.columns?.domain || 'Domain'}</span><span>{risks.columns?.probability || 'Probability'}</span><span>{risks.columns?.consequences || 'Consequences'}</span><span>{risks.columns?.controlStatus || 'Control Status'}</span><span>{risks.columns?.category || 'Risk Category'}</span><span>{risks.columns?.reviewDate || 'Review Date'}</span><span>{risks.columns?.reviewFrequency || 'Review Frequency'}</span></>}
           row={item => (
             <div className="table-row risk-table-row" key={item.id}>
-              <NotionLink item={item}>{item.riskId?`${item.riskId} · `:''}{item.name}</NotionLink>
+              <span>{item.riskId ?? '—'}</span>
+              <NotionLink item={item}>{item.name}</NotionLink>
+              <span>{item.owner||'—'}</span>
               <span>{item.domain||'—'}</span>
               <Badge>{item.probability}</Badge>
               <span>{item.consequences||'—'}</span>
               <Badge>{item.controlStatus}</Badge>
               <Badge>{item.category}</Badge>
-              <span>{item.owner||'—'}</span>
+              <time>{formatDate(item.reviewDate)}</time>
+              <span>{item.reviewFrequency||'—'}</span>
             </div>
           )}
         />
@@ -469,10 +487,13 @@ function Controls({ controls, filter, onFilter }) {
       <Panel title="Controls Register" source="Controls Register">
         <ScrollTable
           items={rows}
-          head={<><span>Control</span><span>Domain</span><span>Control type</span><span>Status</span><span>Owner</span><span>Review date</span><span>Review frequency</span></>}
+          minWidth={1450}
+          columns="80px minmax(240px,2fr) minmax(120px,1fr) minmax(130px,1fr) 105px minmax(120px,1fr) 110px 135px"
+          head={<><span>{controls.columns?.controlId || 'Control ID'}</span><span>{controls.columns?.title || 'Control'}</span><span>{controls.columns?.domain || 'Domain'}</span><span>{controls.columns?.type || 'Control Type'}</span><span>{controls.columns?.status || 'Status'}</span><span>{controls.columns?.owner || 'Owner'}</span><span>{controls.columns?.reviewDate || 'Review Date'}</span><span>{controls.columns?.reviewFrequency || 'Review Frequency'}</span></>}
           row={item => (
             <div className="table-row controls-table-row" key={item.id}>
-              <NotionLink item={item}>{item.controlId?`${item.controlId} · `:''}{item.name}</NotionLink>
+              <span>{item.controlId ?? '—'}</span>
+              <NotionLink item={item}>{item.name}</NotionLink>
               <span>{item.domain||'—'}</span>
               <span>{item.type||'—'}</span>
               <Badge>{item.status}</Badge>
@@ -537,14 +558,18 @@ function DocumentLibrary({ documents, filter, onFilter }) {
       <Panel title="Document Library" source="Document Library">
         <ScrollTable
           items={rows}
-          head={<><span>Document</span><span>Domain</span><span>Type</span><span>Owner</span><span>Status</span><span>Next review</span><span>Next approval</span></>}
+          minWidth={1520}
+          columns="68px minmax(230px,2fr) minmax(120px,1fr) minmax(110px,.9fr) minmax(120px,1fr) 105px 115px 120px 130px"
+          head={<><span>{documents.columns?.docId || 'Doc ID'}</span><span>{documents.columns?.title || 'Document'}</span><span>{documents.columns?.domain || 'Domain'}</span><span>{documents.columns?.type || 'Type'}</span><span>{documents.columns?.owner || 'Owner'}</span><span>{documents.columns?.status || 'Status'}</span><span>{documents.columns?.reviewCycle || 'Review Cycle'}</span><span>{documents.columns?.nextReviewDate || 'Next Review Date'}</span><span>{documents.columns?.nextApprovalDate || 'Next Approval Date'}</span></>}
           row={item => (
             <div className="table-row document-table-row" key={item.id}>
-              <NotionLink item={item}>{item.docId?`${item.docId} · `:''}{item.name}</NotionLink>
+              <span>{item.docId ?? '—'}</span>
+              <NotionLink item={item}>{item.name}</NotionLink>
               <span>{item.domain||'—'}</span>
               <span>{item.type||'—'}</span>
               <span>{item.owner||'—'}</span>
               <Badge>{item.status}</Badge>
+              <span>{item.reviewCycle||'—'}</span>
               <time>{formatDate(item.nextReviewDate)}</time>
               <time>{formatDate(item.nextApprovalDate)}</time>
             </div>
@@ -573,7 +598,9 @@ function RoPA({ ropa, filter, onFilter }) {
       <Panel title="Register of Processing Activities" source="RoPA">
         <ScrollTable
           items={rows}
-          head={<><span>Processing activity</span><span>Data subjects</span><span>Personal data</span><span>Purpose</span><span>Lawful basis</span><span>Systems</span><span>Retention</span><span>Flag</span></>}
+          minWidth={1640}
+          columns="minmax(220px,1.8fr) minmax(130px,1fr) minmax(140px,1.1fr) minmax(150px,1.2fr) minmax(120px,.9fr) minmax(130px,1fr) 110px minmax(120px,1fr) 110px"
+          head={<><span>{ropa.columns?.title || 'Processing Activity'}</span><span>{ropa.columns?.subjects || 'Data Subjects'}</span><span>{ropa.columns?.personalData || 'Personal Data'}</span><span>{ropa.columns?.purpose || 'Purpose'}</span><span>{ropa.columns?.basis || 'Lawful Basis'}</span><span>{ropa.columns?.systems || 'Systems'}</span><span>{ropa.columns?.retention || 'Retention'}</span><span>{ropa.columns?.owner || 'Owner'}</span><span>{ropa.columns?.flag || 'Flag'}</span></>}
           row={item => (
             <div className="table-row ropa-table-row" key={item.id}>
               <NotionLink item={item}>{item.name}</NotionLink>
@@ -583,6 +610,7 @@ function RoPA({ ropa, filter, onFilter }) {
               <span>{item.basis||'—'}</span>
               <span>{item.systems||'—'}</span>
               <span>{item.retention||'—'}</span>
+              <span>{item.owner||'—'}</span>
               <Badge>{item.flag}</Badge>
             </div>
           )}
@@ -634,7 +662,9 @@ function ITTools({ tools, filter, onFilter }) {
       <Panel title="Access Matrix — Active Tools" source="Access Matrix">
         <ScrollTable
           items={rows}
-          head={<><span>Tool / supplier</span><span>Category</span><span>Owner</span><span>Criticality</span><span>DPA</span><span>MFA</span><span>Next review</span></>}
+          minWidth={1220}
+          columns="minmax(220px,1.8fr) 1fr 1fr .9fr .9fr .9fr .9fr"
+          head={<><span>{tools.columns?.title || 'Tool / Supplier'}</span><span>{tools.columns?.category || 'Category'}</span><span>{tools.columns?.owner || 'Owner'}</span><span>{tools.columns?.criticality || 'Criticality'}</span><span>{tools.columns?.dpa || 'DPA'}</span><span>{tools.columns?.mfa || 'MFA'}</span><span>{tools.columns?.reviewDate || 'Next Review'}</span></>}
           row={ToolRow}
         />
         {retired.length > 0 && (
@@ -645,7 +675,7 @@ function ITTools({ tools, filter, onFilter }) {
             </button>
             {retiredOpen && (
               <div style={{marginTop:8}}>
-                <ScrollTable items={retired} head={<><span>Tool / supplier</span><span>Category</span><span>Owner</span><span>Criticality</span><span>DPA</span><span>MFA</span><span>Next review</span></>} row={ToolRow} />
+                <ScrollTable items={retired} minWidth={1220} columns="minmax(220px,1.8fr) 1fr 1fr .9fr .9fr .9fr .9fr" head={<><span>{tools.columns?.title || 'Tool / Supplier'}</span><span>{tools.columns?.category || 'Category'}</span><span>{tools.columns?.owner || 'Owner'}</span><span>{tools.columns?.criticality || 'Criticality'}</span><span>{tools.columns?.dpa || 'DPA'}</span><span>{tools.columns?.mfa || 'MFA'}</span><span>{tools.columns?.reviewDate || 'Next Review'}</span></>} row={ToolRow} />
               </div>
             )}
           </div>
@@ -768,21 +798,21 @@ function DashboardStyles() {
     .state-band strong { color: #1d3e35; display: block; font-size: 25px; letter-spacing: -.06em; }
     .state-band span { color: #7c8983; display: block; font-size: 10px; margin-top: 5px; }
 
-    /* scroll table */
-    .scroll-table-body { border: 1px solid #e4e9e6; }
-    .scroll-table-body::-webkit-scrollbar { width: 5px; }
-    .scroll-table-body::-webkit-scrollbar-track { background: #f0f4f0; }
-    .scroll-table-body::-webkit-scrollbar-thumb { background: #b0c0b8; border-radius: 3px; }
+    /* tables + pagination */
+    .table-scroll { border: 1px solid #e4e9e6; overflow-x: auto; }
+    .table-scroll::-webkit-scrollbar { height: 6px; }
+    .table-scroll::-webkit-scrollbar-track { background: #f0f4f0; }
+    .table-scroll::-webkit-scrollbar-thumb { background: #b0c0b8; border-radius: 3px; }
     .data-table { min-width: 810px; }
-    .table-head, .table-row { display: grid; gap: 10px; padding: 9px 8px; }
-    .table-head { background: #f0f4f0; color: #587168; font-size: 9px; font-weight: 600; letter-spacing: .08em; position: sticky; top: 0; text-transform: uppercase; z-index: 1; }
+    .table-head, .table-row { display: grid; gap: 10px; grid-template-columns: var(--table-columns, minmax(220px, 2fr) repeat(6, minmax(110px, 1fr))); padding: 9px 8px; }
+    .table-head { background: #f0f4f0; color: #587168; font-size: 9px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
     .table-row { align-items: center; border-bottom: 1px solid #e4e9e6; color: #5e7068; font-size: 11px; min-height: 48px; }
     .table-row:hover { background: #f4f8f4; }
-    .risk-table-row     { grid-template-columns: minmax(220px,2.4fr) 1fr .8fr .8fr 1fr 1fr 1fr; }
-    .controls-table-row { grid-template-columns: minmax(220px,2fr) 1fr 1fr .9fr 1fr .9fr 1fr; }
-    .document-table-row { grid-template-columns: minmax(220px,2fr) 1fr .8fr 1fr .9fr .9fr .9fr; }
-    .ropa-table-row     { grid-template-columns: minmax(210px,1.8fr) 1fr 1.1fr 1.2fr .9fr 1fr .8fr .8fr; min-width: 1060px; }
-    .tools-table-row    { grid-template-columns: minmax(220px,1.8fr) 1fr 1fr .9fr .9fr .9fr .9fr; }
+    .table-pagination { align-items: center; color: #6f7f78; display: flex; font-size: 10px; justify-content: space-between; gap: 12px; padding: 10px 2px 0; }
+    .page-controls { display: flex; gap: 4px; max-width: 60%; overflow-x: auto; padding-bottom: 2px; }
+    .page-controls button { background: #fffdf8; border: 1px solid #ced8d2; color: #486058; flex: 0 0 auto; font-size: 10px; line-height: 1; min-width: 27px; padding: 6px 8px; }
+    .page-controls button:hover:not(:disabled), .page-controls button.current { background: #31594f; border-color: #31594f; color: #fff; }
+    .page-controls button:disabled { cursor: not-allowed; opacity: .4; }
 
     /* MY ACTIONS */
     .actions-header { align-items: center; display: flex; gap: 12px; margin-bottom: 12px; justify-content: space-between; flex-wrap: wrap; }
@@ -834,9 +864,10 @@ function DashboardStyles() {
     .cal-more { color: #839089; font-size: 9px; padding: 1px 4px; }
 
     /* workflows two-col */
-    .wf-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 28px; }
-    .wf-group-col { }
-    .wf-group-label { color: #839089; font-size: 9px; font-weight: 600; letter-spacing: .09em; margin: 14px 0 6px; text-transform: uppercase; }
+    .workflow-panel { min-height: 0; padding-bottom: 12px; }
+    .workflow-groups { align-items: start; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 20px; }
+    .wf-group-col { align-self: start; min-width: 0; }
+    .wf-group-label { color: #839089; font-size: 9px; font-weight: 600; letter-spacing: .09em; margin: 12px 0 6px; text-transform: uppercase; }
     .wf-item { border-bottom: 1px solid #e4e9e6; }
     .wf-item:last-child { border-bottom: 0; }
     .wf-row { align-items: center; background: transparent; border: 0; display: flex; gap: 10px; padding: 9px 4px; text-align: left; width: 100%; }
@@ -872,7 +903,7 @@ function DashboardStyles() {
       .metric-band { grid-template-columns: repeat(3,1fr); }
       .metric-band button:nth-child(4) { border-left: 0; }
       .two-columns { grid-template-columns: 1fr; }
-      .wf-two-col { grid-template-columns: 1fr; }
+      .workflow-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       footer.site-footer { margin: 0 24px; }
     }
     @media (max-width: 560px) {
@@ -887,6 +918,7 @@ function DashboardStyles() {
       .state-band div { border-top-color: #dde5df; }
       .panel { padding: 0 14px 14px; }
       .panel-heading span { display: none; }
+      .workflow-groups { grid-template-columns: 1fr; }
       footer.site-footer { margin: 0 16px; }
     }
   `}</style>
@@ -898,7 +930,7 @@ function DashboardStyles() {
 export default function Dashboard() {
   const [tab,    setTab]    = useState('overview')
   const [filter, setFilter] = useState('all')
-  const [person, setPerson] = useState('Kate McAlpine')
+  const [person, setPerson] = useState('')
   const [data,   setData]   = useState({})
   const [error,  setError]  = useState('')
   const [loading,setLoading]= useState(true)
@@ -919,8 +951,7 @@ export default function Dashboard() {
   // Deduplicated person list — no duplicates from "Dr Kate McAlpine" vs "Kate McAlpine"
   const personOptions = useMemo(() => {
     const raw = Object.values(data).flatMap(e => e?.items||[]).flatMap(i => i.owner?.split(',').map(n=>n.trim())||[]).filter(Boolean)
-    const names = dedupeNames(raw)
-    return names.includes('Kate McAlpine') ? names : ['Kate McAlpine', ...names]
+    return dedupeNames(raw)
   }, [data])
 
   const scoped = useMemo(() => {
