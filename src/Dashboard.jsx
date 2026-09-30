@@ -617,6 +617,13 @@ export default function Dashboard() {
             }}>
               {syncing ? '↻ Syncing…' : '↻ Sync'}
             </button>
+            <a href="/.netlify/functions/auth?action=logout" style={{
+              border: '1px solid rgba(255,255,255,0.12)', borderRadius: 3, padding: '7px 14px',
+              fontFamily: C.sg, fontSize: 10, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase',
+              color: 'rgba(245,242,236,0.5)', textDecoration: 'none',
+            }}>
+              Sign out
+            </a>
           </div>
         </div>
 

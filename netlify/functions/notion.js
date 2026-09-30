@@ -1,3 +1,5 @@
+const { requireUser, unauthorized } = require('./auth')
+
 const TOKEN = process.env.NOTION_TOKEN
 
 const DS = {
@@ -75,6 +77,9 @@ function aggregateTracker(pages) {
 }
 
 exports.handler = async (event) => {
+  // Second line of defence behind the edge gate: no valid session, no data.
+  if (!requireUser(event)) return unauthorized()
+
   const db = event.queryStringParameters?.db
   if (!db || !DS[db]) {
     return { statusCode: 400, body: JSON.stringify({ error: 'Invalid db param' }) }
