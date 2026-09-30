@@ -1,671 +1,1041 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
-// ── Config ───────────────────────────────────────────────────────
+/* ── API helpers ─────────────────────────────────────────── */
+const get = key => fetch(`/.netlify/functions/notion?db=${key}`).then(async res => {
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || `API error ${res.status}`)
+  return data
+})
+const patch = (pageId, status) =>
+  fetch(`/.netlify/functions/notion?action=patch&pageId=${pageId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  }).then(async res => {
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || `API error ${res.status}`)
+    return data
+  })
 
-// ── Brand tokens ─────────────────────────────────────────────────
-const C = {
-  forest:   '#11302A',
-  amber:    '#CD8028',
-  yellow:   '#F0C71D',
-  coral:    '#EE5C5F',
-  olive:    '#858755',
-  burgundy: '#511433',
-  cream:    '#F5F2EC',
-  white:    '#FFFFFF',
-  positive: '#2d8a4e',
-  border:   'rgba(17,48,42,0.09)',
-  text:     '#11302A',
-  textMid:  'rgba(17,48,42,0.6)',
-  textDim:  'rgba(17,48,42,0.38)',
-  sg:       "'Space Grotesk', sans-serif",
-  ws:       "'Work Sans', sans-serif",
+/* ── Utilities ───────────────────────────────────────────── */
+const formatDate = v =>
+  v ? new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(`${v}T00:00:00`)) : '—'
+const count = (items, prop, vals) =>
+  vals.reduce((r, v) => ({ ...r, [v]: items.filter(i => i[prop] === v).length }), {})
+const statusTone = v =>
+  ['Done','Active','Approved','Closed','In Place','Enabled'].includes(v) ? 'good'
+  : ['High','Overdue','Not In Place','Not in place','Pending'].includes(v) ? 'critical'
+  : 'attention'
+const displayName = name => {
+  const cleaned = name.replace(/^dr\s+/i,'').trim()
+  return /^sumaiya(?:\s|$)/i.test(cleaned) ? 'Sumaiya' : cleaned
+}
+const normaliseName = name => displayName(name).toLowerCase()
+const dedupeNames = names => {
+  const seen = new Map()
+  for (const name of names) {
+    const key = normaliseName(name)
+    if (!seen.has(key)) seen.set(key, displayName(name))
+  }
+  return [...seen.values()].sort()
 }
 
-// ── Global styles injected once ──────────────────────────────────
-const GLOBAL_CSS = `
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body, #root { background: ${C.cream}; min-height: 100vh; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @keyframes fadeUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
-  a { color: inherit; }
-`
+const RECURRING = ['Monthly','Quarterly','Annual','Annually']
 
-// ── API helpers ──────────────────────────────────────────────────
-async function fetchRisks() {
-  const res = await fetch('/.netlify/functions/notion?db=risks')
-  if (!res.ok) throw new Error(`API error ${res.status}`)
-  return res.json()
+/* ── Shared components ───────────────────────────────────── */
+function Badge({ children }) {
+  return <span className={`badge ${statusTone(children)}`}>{children || '—'}</span>
 }
-
-async function fetchControls() {
-  const res = await fetch('/.netlify/functions/notion?db=controls')
-  if (!res.ok) throw new Error(`API error ${res.status}`)
-  return res.json()
+function NotionLink({ item, children }) {
+  return <a className="notion-link" href={item.url} target="_blank" rel="noreferrer">{children}<span aria-hidden="true">↗</span></a>
 }
-
-async function fetchTracker() {
-  const res = await fetch('/.netlify/functions/notion?db=tracker')
-  if (!res.ok) throw new Error(`API error ${res.status}`)
-  return res.json()
-}
-
-// ── Shared UI primitives ─────────────────────────────────────────
-
-function Spinner() {
+function Panel({ title, source, children, className = '' }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '14px 0' }}>
-      <div style={{ width: 14, height: 14, borderRadius: '50%', border: `2px solid ${C.border}`, borderTopColor: C.amber, animation: 'spin 0.7s linear infinite', flexShrink: 0 }} />
-      <span style={{ fontFamily: C.ws, fontSize: 11, color: C.textDim }}>Loading from Notion…</span>
-    </div>
-  )
-}
-
-function ErrorMsg({ msg }) {
-  return (
-    <div style={{ background: `${C.coral}10`, border: `1px solid ${C.coral}30`, borderRadius: 4, padding: '10px 12px', fontFamily: C.ws, fontSize: 11, color: C.coral }}>
-      {msg}
-    </div>
-  )
-}
-
-function Badge({ label, color = C.amber }) {
-  return (
-    <span style={{ display: 'inline-block', fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', padding: '3px 7px', borderRadius: 3, background: `${color}18`, color, whiteSpace: 'nowrap' }}>
-      {label}
-    </span>
-  )
-}
-
-function Dot({ color, size = 6 }) {
-  return <div style={{ width: size, height: size, borderRadius: '50%', background: color, flexShrink: 0, marginTop: size === 6 ? 3 : 0 }} />
-}
-
-function BarRow({ label, value, max, color = C.amber }) {
-  const pct = max > 0 ? Math.min((value / max) * 100, 100) : 0
-  return (
-    <div style={{ marginBottom: 10 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-        <span style={{ fontFamily: C.ws, fontSize: 12, color: C.textMid }}>{label}</span>
-        <span style={{ fontFamily: C.sg, fontSize: 12, fontWeight: 600, color: C.text }}>{value}</span>
-      </div>
-      <div style={{ height: 3, background: 'rgba(17,48,42,0.07)', borderRadius: 2 }}>
-        <div style={{ height: 3, width: `${pct}%`, background: color, borderRadius: 2, transition: 'width 1s ease' }} />
-      </div>
-    </div>
-  )
-}
-
-function SectionCard({ title, sub, children, style = {} }) {
-  return (
-    <div style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 4, padding: '22px 24px', ...style }}>
-      <div style={{ fontFamily: C.sg, fontSize: 11, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.text, marginBottom: 3 }}>{title}</div>
-      {sub && <div style={{ fontFamily: C.ws, fontSize: 11, color: C.textDim, marginBottom: 18 }}>{sub}</div>}
+    <section className={`panel ${className}`}>
+      <header className="panel-heading"><h2>{title}</h2>{source && <span>{source}</span>}</header>
       {children}
+    </section>
+  )
+}
+function MetricBand({ metrics }) {
+  return (
+    <section className="metric-band" aria-label="Key indicators">
+      {metrics.map(m => (
+        <button type="button" key={m.label} onClick={m.onClick}>
+          <span>{m.label}</span><strong className={m.tone || ''}>{m.value}</strong>
+        </button>
+      ))}
+    </section>
+  )
+}
+function FilterBar({ options, value, onChange }) {
+  return (
+    <div className="filter-bar">
+      {options.map(([f, l]) => (
+        <button key={f} type="button" className={value === f ? 'selected' : ''} onClick={() => onChange(f)}>{l}</button>
+      ))}
     </div>
   )
 }
-
-function KpiCard({ label, value, sub, badge, badgeColor, topColor = C.amber, loading, error }) {
+function SearchBox({ value, onChange, placeholder }) {
   return (
-    <div style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 4, padding: '20px 22px', position: 'relative', overflow: 'hidden', animation: 'fadeUp 0.4s ease both' }}>
-      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: topColor }} />
-      <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.textDim, marginBottom: 7 }}>{label}</div>
-      {loading ? <Spinner /> : error ? <ErrorMsg msg={error} /> : (
-        <>
-          <div style={{ fontFamily: C.sg, fontSize: 30, fontWeight: 700, color: C.text, lineHeight: 1, marginBottom: 5 }}>{value ?? '—'}</div>
-          <div style={{ fontFamily: C.ws, fontSize: 11, color: C.textMid }}>{sub}</div>
-          {badge && <div style={{ marginTop: 8 }}><Badge label={badge} color={badgeColor || topColor} /></div>}
-        </>
+    <div className="search-box-wrap">
+      <input
+        className="search-box"
+        type="search"
+        placeholder={placeholder || 'Search…'}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        aria-label={placeholder || 'Search'}
+      />
+    </div>
+  )
+}
+// Tables show ten records per page; wide tables can still scroll horizontally.
+function ScrollTable({ items, head, row: RowFn, pageSize = 10, minWidth = 810, columns }) {
+  const [page, setPage] = useState(1)
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize))
+  const currentPage = Math.min(page, pageCount)
+  const start = (currentPage - 1) * pageSize
+  const pageItems = items.slice(start, start + pageSize)
+
+  useEffect(() => { setPage(1) }, [items])
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount)
+  }, [page, pageCount])
+
+  return (
+    <div className="table-wrap">
+      <div className="table-scroll">
+        <div className="data-table" style={{ minWidth, '--table-columns': columns }}>
+          <div className="table-head">{head}</div>
+          {items.length ? pageItems.map(RowFn) : <div className="table-row" style={{ gridColumn: '1/-1', color: '#8a9690', fontSize: 11 }}>No matching records</div>}
+        </div>
+      </div>
+      {items.length > pageSize && (
+        <nav className="table-pagination" aria-label="Table pages">
+          <span>Showing {start + 1}–{Math.min(start + pageSize, items.length)} of {items.length}</span>
+          <div className="page-controls">
+            <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage === 1} aria-label="Previous page">‹</button>
+            {Array.from({ length: pageCount }, (_, index) => index + 1).map(number => (
+              <button type="button" key={number} className={number === currentPage ? 'current' : ''} onClick={() => setPage(number)} aria-current={number === currentPage ? 'page' : undefined}>{number}</button>
+            ))}
+            <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage === pageCount} aria-label="Next page">›</button>
+          </div>
+        </nav>
       )}
     </div>
   )
 }
 
-function RowItem({ name, meta, badge, badgeColor, last = false }) {
+/* ── Checkable task row ──────────────────────────────────── */
+function CheckRow({ item, onDone }) {
+  const [loading, setLoading] = useState(false)
+  const [done, setDone] = useState(item.status === 'Done')
+  const toggle = async () => {
+    if (done || loading) return
+    setLoading(true)
+    try { await patch(item.id, 'Done'); setDone(true); onDone && onDone(item.id) } catch { }
+    setLoading(false)
+  }
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: last ? 'none' : '1px solid rgba(17,48,42,0.06)', gap: 8 }}>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text, lineHeight: 1.35 }}>{name}</div>
-        {meta && <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{meta}</div>}
+    <div className={`action-row${done ? ' action-done' : ''}`}>
+      <button type="button" className={`action-check${done ? ' checked' : ''}${loading ? ' loading' : ''}`} onClick={toggle} aria-label={done ? 'Done' : 'Mark as done'}>
+        {done ? '✓' : loading ? '…' : ''}
+      </button>
+      <div className="action-info">
+        <NotionLink item={item}>{item.activityId ? `${item.activityId} · ` : ''}{item.name}</NotionLink>
+        <p>{item.owner || '—'} · {formatDate(item.dueDate)}</p>
       </div>
-      {badge && <Badge label={badge} color={badgeColor} />}
+      <Badge>{item.status}</Badge>
     </div>
   )
 }
 
-function DonutRing({ pct, color, size = 100 }) {
-  const r = (size - 10) / 2
-  const circ = 2 * Math.PI * r
-  const dash = (pct / 100) * circ
+/* ── TaskRows (simple read-only list) ────────────────────── */
+function TaskRows({ items }) {
   return (
-    <div style={{ position: 'relative', width: size, height: size, flexShrink: 0 }}>
-      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(17,48,42,0.07)" strokeWidth={9} />
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={9}
-          strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"
-          style={{ transition: 'stroke-dasharray 1.2s ease' }} />
-      </svg>
-      <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-        <span style={{ fontFamily: C.sg, fontSize: 17, fontWeight: 700, color, lineHeight: 1 }}>{pct}%</span>
-        <span style={{ fontFamily: C.ws, fontSize: 8, color: C.textDim, letterSpacing: '0.05em', textTransform: 'uppercase', marginTop: 2 }}>Active</span>
-      </div>
-    </div>
-  )
-}
-
-// ── Tab panels ───────────────────────────────────────────────────
-
-function OverviewTab({ risks, controls, tracker, loading, errors }) {
-  const r = risks || {}
-  const c = controls || {}
-  const t = tracker || {}
-
-  const highN        = r.byProbability?.High ?? 0
-  const openN        = r.byCategory?.Open ?? 0
-  const inActiveN    = c.byStatus?.Active ?? 0
-  const controlPct   = c.total > 0 ? Math.round((inActiveN / c.total) * 100) : 0
-  const doneN        = t.byStatus?.Done ?? 0
-  const overdueN     = t.byStatus?.Overdue ?? 0
-  const denom        = (t.total || 0) - (t.byStatus?.Skipped || 0)
-  const completionPct = denom > 0 ? Math.round((doneN / denom) * 100) : 0
-
-  const upcoming = t.upcoming || []
-
-  return (
-    <div>
-      <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 14 }}>
-        KEY INDICATORS — {new Date().toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }).toUpperCase()}
-      </div>
-
-      {/* KPI strip */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <KpiCard label="Total Risks" value={r.total} sub="Unified risk register" topColor={C.forest} loading={loading.risks} error={errors.risks} />
-        <KpiCard label="High Probability" value={highN} sub="Requiring attention"
-          topColor={highN > 0 ? C.coral : C.positive}
-          badge={highN > 0 ? 'Action needed' : 'Under control'}
-          badgeColor={highN > 0 ? C.coral : C.positive}
-          loading={loading.risks} error={errors.risks} />
-        <KpiCard label="Open Risks" value={openN} sub="Awaiting mitigation" topColor={C.amber} loading={loading.risks} error={errors.risks} />
-        <KpiCard label="Controls Active" value={c.total ? `${controlPct}%` : null} sub={c.total ? `${inActiveN} of ${c.total} controls` : ''}
-          topColor={controlPct >= 80 ? C.positive : controlPct >= 50 ? C.amber : C.coral}
-          badge={controlPct >= 80 ? 'Strong coverage' : controlPct >= 50 ? 'Partial coverage' : 'Gaps present'}
-          badgeColor={controlPct >= 80 ? C.positive : controlPct >= 50 ? C.amber : C.coral}
-          loading={loading.controls} error={errors.controls} />
-        <KpiCard label="Activities Done" value={t.total ? `${completionPct}%` : null} sub={t.total ? `${doneN} of ${denom} activities` : ''}
-          topColor={completionPct >= 70 ? C.positive : completionPct >= 40 ? C.amber : C.coral}
-          loading={loading.tracker} error={errors.tracker} />
-        <KpiCard label="Overdue" value={overdueN} sub="Past due date"
-          topColor={overdueN > 0 ? C.coral : C.positive}
-          badge={overdueN > 0 ? 'Action needed' : 'All on track'}
-          badgeColor={overdueN > 0 ? C.coral : C.positive}
-          loading={loading.tracker} error={errors.tracker} />
-      </div>
-
-      {/* Safeguarding status strip */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 10 }}>SAFEGUARDING STATUS</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
-          {[
-            { label: 'SFP Appointed', value: 'Pending', sub: 'Sumaiya Karim — in progress', color: C.coral },
-            { label: 'Incidents YTD', value: '0 reported', sub: `Jan – ${new Date().toLocaleDateString('en-GB',{month:'short'})} ${new Date().getFullYear()}`, color: C.positive },
-            { label: 'Code of Conduct', value: 'Not verified', sub: 'Sign-off status unconfirmed', color: C.amber },
-            { label: 'Mandatory Training', value: 'Not verified', sub: 'Completion rate unknown', color: C.amber },
-          ].map(({ label, value, sub, color }) => (
-            <div key={label} style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 4, padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Dot color={color} size={10} />
+    <div className="rows">
+      {items.length
+        ? items.map(i => (
+            <div className="row" key={i.id}>
               <div>
-                <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 3 }}>{label}</div>
-                <div style={{ fontFamily: C.sg, fontSize: 13, fontWeight: 600, color }}>{value}</div>
-                <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim }}>{sub}</div>
+                <NotionLink item={i}>{i.activityId ? `${i.activityId} · ` : ''}{i.name}</NotionLink>
+                <p>{i.owner || '—'} · {formatDate(i.dueDate)}</p>
               </div>
+              <Badge>{i.status}</Badge>
             </div>
-          ))}
-        </div>
-      </div>
+          ))
+        : <p className="empty">No matching records</p>}
+    </div>
+  )
+}
 
-      {/* Lower grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        <SectionCard title="Risk Register — By Domain" sub={r.total ? `${r.total} total risks across all domains` : ' '}>
-          {loading.risks ? <Spinner /> : errors.risks ? <ErrorMsg msg={errors.risks} /> :
-            Object.entries(r.byDomain || {}).filter(([,v]) => v > 0).map(([k, v]) =>
-              <BarRow key={k} label={k} value={v} max={r.total} color={C.forest} />
-            )
-          }
-        </SectionCard>
-
-        <SectionCard title="Upcoming Deadlines" sub="Next activities due">
-          {loading.tracker ? <Spinner /> : errors.tracker ? <ErrorMsg msg={errors.tracker} /> :
-            !upcoming.length
-              ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>No upcoming items</p>
-              : upcoming.map((item, i) => {
-                  const isOverdue = item.status === 'Overdue'
-                  const sc = isOverdue ? C.coral : item.status === 'In Progress' ? C.amber : 'rgba(17,48,42,0.25)'
-                  return (
-                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: i < upcoming.length - 1 ? '1px solid rgba(17,48,42,0.06)' : 'none', gap: 8 }}>
-                      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flex: 1 }}>
-                        <Dot color={sc} />
-                        <div>
-                          <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text, lineHeight: 1.35 }}>{item.name}</div>
-                          <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{item.dueDate} · {item.owner}</div>
-                        </div>
-                      </div>
-                      <Badge label={item.status} color={sc} />
+/* ══════════════════════════════════════════════════════════
+   OVERVIEW
+   ════════════════════════════════════════════════════════ */
+// Collapsible domain list used on Overview
+function DomainRiskList({ risks }) {
+  const [openDomain, setOpenDomain] = useState(null)
+  const domains = Object.entries(risks.byDomain || {}).filter(([, v]) => v)
+  return (
+    <div className="domain-list">
+      {domains.map(([label, value]) => {
+        const isOpen = openDomain === label
+        const domainRisks = risks.items.filter(i => i.domain === label)
+        return (
+          <div key={label} className="domain-item">
+            <button type="button" className="domain-row" onClick={() => setOpenDomain(isOpen ? null : label)}>
+              <span className="domain-name">{label}</span>
+              <i className="domain-bar-track"><em style={{ width: `${risks.total ? value / risks.total * 100 : 0}%` }} /></i>
+              <b className="domain-count">{value}</b>
+              <span className={`wf-chev${isOpen ? ' open' : ''}`}>⌄</span>
+            </button>
+            {isOpen && (
+              <div className="domain-risks">
+                {domainRisks.map(r => (
+                  <div className="domain-risk-row" key={r.id}>
+                    <NotionLink item={r}>{r.riskId ? `${r.riskId} · ` : ''}{r.name}</NotionLink>
+                    <div className="domain-risk-meta">
+                      <Badge>{r.probability}</Badge>
+                      <Badge>{r.controlStatus || r.category || '—'}</Badge>
+                      <span>{r.owner || '—'}</span>
                     </div>
-                  )
-                })
-          }
-        </SectionCard>
-      </div>
-    </div>
-  )
-}
-
-function RisksTab({ risks, loading, errors }) {
-  const r = risks || {}
-  if (loading.risks) return <SectionCard title="Risk Register"><Spinner /></SectionCard>
-  if (errors.risks)  return <SectionCard title="Risk Register"><ErrorMsg msg={errors.risks} /></SectionCard>
-
-  return (
-    <div>
-      <SectionCard title="Risk Register — Domain Breakdown" sub={`${r.total} total risks · Live from Notion`} style={{ marginBottom: 14 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
-          {Object.entries(r.byDomain || {}).map(([domain, count]) => {
-            const pct = r.total > 0 ? Math.round((count / r.total) * 100) : 0
-            return (
-              <div key={domain} style={{ background: C.cream, borderRadius: 4, padding: '14px 16px' }}>
-                <div style={{ fontFamily: C.sg, fontSize: 8, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: C.textDim, marginBottom: 6 }}>{domain}</div>
-                <div style={{ fontFamily: C.sg, fontSize: 26, fontWeight: 700, color: C.text, lineHeight: 1 }}>{count}</div>
-                <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 3 }}>{pct}% of total</div>
-                <div style={{ height: 3, background: 'rgba(17,48,42,0.07)', borderRadius: 2, marginTop: 8 }}>
-                  <div style={{ height: 3, width: `${pct}%`, background: C.amber, borderRadius: 2, transition: 'width 1s ease' }} />
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </SectionCard>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14 }}>
-        {[
-          { title: 'Probability', items: [
-            { label: 'High', value: r.byProbability?.High ?? 0, color: C.coral },
-            { label: 'Medium', value: r.byProbability?.Medium ?? 0, color: C.amber },
-            { label: 'Low', value: r.byProbability?.Low ?? 0, color: C.positive },
-          ]},
-          { title: 'Category', items: [
-            { label: 'Open', value: r.byCategory?.Open ?? 0, color: C.amber },
-            { label: 'Addressed', value: r.byCategory?.Addressed ?? 0, color: C.olive },
-            { label: 'Closed', value: r.byCategory?.Closed ?? 0, color: C.positive },
-          ]},
-          { title: 'Control Status', items: [
-            { label: 'In Place', value: r.byControlStatus?.['In Place'] ?? 0, color: C.positive },
-            { label: 'Partial', value: r.byControlStatus?.Partial ?? 0, color: C.amber },
-            { label: 'Not In Place', value: r.byControlStatus?.['Not In Place'] ?? 0, color: C.coral },
-          ]},
-        ].map(({ title, items }) => (
-          <SectionCard key={title} title={title} sub=" ">
-            {items.map(({ label, value, color }, i) => (
-              <div key={label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: i < items.length - 1 ? '1px solid rgba(17,48,42,0.06)' : 'none' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Dot color={color} size={8} />
-                  <span style={{ fontFamily: C.ws, fontSize: 13, color: C.text }}>{label}</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontFamily: C.sg, fontSize: 20, fontWeight: 700, color }}>{value}</span>
-                  <Badge label={`${r.total > 0 ? Math.round((value/r.total)*100) : 0}%`} color={color} />
-                </div>
-              </div>
-            ))}
-          </SectionCard>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function ControlsTab({ controls, loading, errors }) {
-  const c = controls || {}
-  if (loading.controls) return <SectionCard title="Controls"><Spinner /></SectionCard>
-  if (errors.controls)  return <SectionCard title="Controls"><ErrorMsg msg={errors.controls} /></SectionCard>
-
-  const activeN = c.byStatus?.Active ?? 0
-  const pct = c.total > 0 ? Math.round((activeN / c.total) * 100) : 0
-  const ringColor = pct >= 80 ? C.positive : pct >= 50 ? C.amber : C.coral
-
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-      <SectionCard title="Controls Coverage" sub={`${c.total} controls registered`}>
-        <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
-          <DonutRing pct={pct} color={ringColor} />
-          <div style={{ flex: 1 }}>
-            {Object.entries(c.byStatus || {}).map(([status, count]) => {
-              const col = status === 'Active' ? C.positive : status === 'Partial' ? C.amber : status === 'Planned' ? C.olive : C.coral
-              return <BarRow key={status} label={status} value={count} max={c.total} color={col} />
-            })}
-          </div>
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Controls — By Domain" sub={`${c.total} controls across domains`}>
-        {Object.entries(c.byDomain || {}).map(([domain, count]) =>
-          <BarRow key={domain} label={domain} value={count} max={c.total} color={C.forest} />
-        )}
-        <div style={{ background: C.cream, borderRadius: 4, padding: '12px 14px', marginTop: 16 }}>
-          <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 8 }}>Status legend</div>
-          {[
-            { label: 'Active — fully implemented', color: C.positive },
-            { label: 'Partial — partially implemented', color: C.amber },
-            { label: 'Planned — scheduled', color: C.olive },
-            { label: 'Not In Place — gap present', color: C.coral },
-          ].map(({ label, color }) => (
-            <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
-              <Dot color={color} />
-              <span style={{ fontFamily: C.ws, fontSize: 11, color: C.textMid }}>{label}</span>
-            </div>
-          ))}
-        </div>
-      </SectionCard>
-    </div>
-  )
-}
-
-function RhythmTab({ tracker, loading, errors }) {
-  const t = tracker || {}
-  if (loading.tracker) return <SectionCard title="Compliance Rhythm"><Spinner /></SectionCard>
-  if (errors.tracker)  return <SectionCard title="Compliance Rhythm"><ErrorMsg msg={errors.tracker} /></SectionCard>
-
-  const done        = t.byStatus?.Done ?? 0
-  const inProgress  = t.byStatus?.['In Progress'] ?? 0
-  const overdue     = t.byStatus?.Overdue ?? 0
-  const notStarted  = t.byStatus?.['To Do'] ?? 0
-  const denom       = (t.total || 0) - (t.byStatus?.Skipped || 0)
-  const pct         = denom > 0 ? Math.round((done / denom) * 100) : 0
-  const rhythmColor = pct >= 70 ? C.positive : pct >= 40 ? C.amber : C.coral
-  const upcoming    = t.upcoming || []
-
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-      <SectionCard title="Activity Status" sub={`${t.total} governance activities total`}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 18 }}>
-          {[
-            { label: 'Done', value: done, color: C.positive },
-            { label: 'In Progress', value: inProgress, color: C.amber },
-            { label: 'Overdue', value: overdue, color: overdue > 0 ? C.coral : C.textDim },
-            { label: 'To Do', value: notStarted, color: C.textDim },
-          ].map(({ label, value, color }) => (
-            <div key={label} style={{ background: C.cream, borderRadius: 4, padding: '12px 10px', textAlign: 'center' }}>
-              <div style={{ fontFamily: C.sg, fontSize: 24, fontWeight: 700, color, lineHeight: 1 }}>{value}</div>
-              <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 4 }}>{label}</div>
-            </div>
-          ))}
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-          <span style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: C.textDim }}>Completion rate</span>
-          <span style={{ fontFamily: C.sg, fontSize: 14, fontWeight: 700, color: rhythmColor }}>{pct}%</span>
-        </div>
-        <div style={{ height: 5, background: 'rgba(17,48,42,0.07)', borderRadius: 3 }}>
-          <div style={{ height: 5, width: `${pct}%`, background: rhythmColor, borderRadius: 3, transition: 'width 1.2s ease' }} />
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Upcoming Deadlines" sub="Next 5 activities due">
-        {!upcoming.length
-          ? <p style={{ fontFamily: C.ws, fontSize: 12, color: C.textDim }}>Nothing upcoming</p>
-          : upcoming.map((item, i) => {
-              const isOverdue = item.status === 'Overdue'
-              const sc = isOverdue ? C.coral : item.status === 'In Progress' ? C.amber : 'rgba(17,48,42,0.25)'
-              return (
-                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: i < upcoming.length - 1 ? '1px solid rgba(17,48,42,0.06)' : 'none', gap: 8 }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text }}>{item.name}</div>
-                    <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{item.dueDate} · {item.owner}</div>
                   </div>
-                  <Badge label={item.status} color={sc} />
-                </div>
-              )
-            })
-        }
-      </SectionCard>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
 
-function SafeguardingTab({ risks, loading, errors }) {
-  const r = risks || {}
-  const sgRisks = [
-    { name: 'Vacant safeguarding lead — governance gap', meta: 'Probability: High · Consequences: Major', badge: 'Open · High', color: C.coral },
-    { name: 'Safeguarding incident during field research', meta: 'Probability: Medium · Consequences: Major', badge: 'Open', color: C.amber },
-    { name: 'Failure to report safeguarding concerns', meta: 'Probability: Medium · Consequences: Major', badge: 'Open', color: C.amber },
-    { name: 'Inconsistent safeguarding training across staff', meta: 'Probability: Medium · Consequences: Moderate', badge: 'Open', color: C.amber },
-    { name: 'Inappropriate one-on-one interactions', meta: 'Probability: Low · Consequences: Major', badge: 'Open', color: C.amber },
-    { name: 'Publication of images without consent', meta: 'Probability: Low · Consequences: Major', badge: 'Open', color: C.amber },
-  ]
-  const forms = [
-    { icon: '🚨', label: 'Safeguarding Incident Report Form', sub: 'Report within 24 hours', url: 'https://forms.gle/bxUfXpGnETCLXrPf6' },
-    { icon: '🔗', label: 'Field Visit Pre-Departure Form', sub: 'Required ≥12 hrs before travel', url: 'https://forms.gle/6KrsSfQYJGxKgidb9' },
-    { icon: '🔗', label: 'Code of Conduct Sign-off Form', sub: 'Required for all staff & contractors', url: 'https://forms.gle/TrKsotFPR55ocGeX8' },
-    { icon: '🔒', label: 'Anonymous Code of Conduct Breach', sub: 'Confidential reporting channel', url: 'https://docs.google.com/forms/d/e/1FAIpQLSdGLuBYGg6SQyZlseDJzF7mYKQvXXz5NbQIOAlsGlgKEYP3LA/viewform' },
-  ]
-  const consentForms = [
-    { icon: '📸', label: 'General Photo Consent', sub: 'Adults · general use', url: 'https://connect-go.kontainer.com/consent/consent-collections/2184bcbf6b594d889802b4d263482185' },
-    { icon: '📸', label: 'Media Consent — Children', sub: 'Required for any child participants', url: 'https://connect-go.kontainer.com/consent/consent-collections/9d58ca5e291a4415a6539009ecdc7705' },
-    { icon: '📸', label: 'Media Consent — Adult Researchers', sub: 'Adults in research context', url: 'https://connect-go.kontainer.com/consent/consent-collections/74f7034c2a3f4bc9877ca5d996335819' },
-    { icon: '🔗', label: 'Professional Reference Check', sub: 'Recruitment screening', url: 'https://docs.google.com/forms/d/e/1FAIpQLSeo6JzaHUHemAr-YL3VjCUnBok-dLskHIYDgPfktkuGU0ikFg/viewform' },
-  ]
-
-  return (
-    <div>
-      {/* Status cards */}
-      <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim, marginBottom: 10 }}>GOVERNANCE STATUS</div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
-        {[
-          { label: 'Safeguarding Focal Person', value: 'Sumaiya Karim', sub: 'Appointment in progress', topColor: C.coral, badge: 'Pending formal appointment', badgeColor: C.coral },
-          { label: 'Incidents This Year', value: '0', sub: `Jan – ${new Date().toLocaleDateString('en-GB',{month:'short',year:'numeric'})} · No reports`, topColor: C.positive, badge: 'All clear', badgeColor: C.positive },
-          { label: 'Code of Conduct Sign-off', value: 'Not verified', sub: 'Status unconfirmed across team', topColor: C.amber, badge: 'Action: confirm with Sumaiya', badgeColor: C.amber },
-          { label: 'Mandatory Training', value: 'Not verified', sub: 'Completion rate unknown', topColor: C.amber, badge: 'Action: confirm with Sumaiya', badgeColor: C.amber },
-        ].map(({ label, value, sub, topColor, badge, badgeColor }) => (
-          <div key={label} style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 4, padding: '20px 22px', position: 'relative', overflow: 'hidden' }}>
-            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: topColor }} />
-            <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: C.textDim, marginBottom: 7 }}>{label}</div>
-            <div style={{ fontFamily: C.sg, fontSize: value.length > 6 ? 16 : 28, fontWeight: 700, color: C.text, lineHeight: 1.1, marginBottom: 5 }}>{value}</div>
-            <div style={{ fontFamily: C.ws, fontSize: 11, color: C.textMid, marginBottom: 8 }}>{sub}</div>
-            <Badge label={badge} color={badgeColor} />
-          </div>
-        ))}
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        {/* Active risks */}
-        <SectionCard title="Safeguarding Risks — Active" sub={`${r.byDomain?.Safeguarding ?? 14} safeguarding risks in register`}>
-          {loading.risks ? <Spinner /> : errors.risks ? <ErrorMsg msg={errors.risks} /> :
-            sgRisks.map((risk, i) => (
-              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: i < sgRisks.length - 1 ? '1px solid rgba(17,48,42,0.06)' : 'none', gap: 8 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text, lineHeight: 1.35 }}>{risk.name}</div>
-                  <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{risk.meta}</div>
-                </div>
-                <Badge label={risk.badge} color={risk.color} />
-              </div>
-            ))
-          }
-          <div style={{ marginTop: 10 }}>
-            <Badge label="+ 8 further safeguarding risks in register" color={C.textDim} />
-          </div>
-        </SectionCard>
-
-        {/* Reporting & contacts */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <SectionCard title="Report an Incident" sub="All incidents must be reported within 24 hours">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {forms.map(({ icon, label, sub, url }) => (
-                <a key={label} href={url} target="_blank" rel="noreferrer"
-                  style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', background: C.cream, borderRadius: 4, textDecoration: 'none' }}>
-                  <span style={{ fontSize: 14 }}>{icon}</span>
-                  <div>
-                    <div style={{ fontFamily: C.sg, fontSize: 11, fontWeight: 600, color: C.forest }}>{label}</div>
-                    <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim }}>{sub}</div>
-                  </div>
-                </a>
-              ))}
-            </div>
-          </SectionCard>
-
-          <SectionCard title="Key Contacts" sub="Safeguarding escalation chain">
-            {[
-              { name: 'Safeguarding Focal Person', meta: 'Sumaiya Karim · appointment in progress', badge: 'Pending', color: C.coral },
-              { name: 'Director (escalation)', meta: 'Dr Kate McAlpine · kate@connectgo.co.uk', badge: 'Active', color: C.positive },
-              { name: 'DPO (data safeguarding)', meta: 'Belinda Mziray · belinda@connectgo.co.uk', badge: 'Active', color: C.positive },
-            ].map((c, i, arr) => (
-              <div key={c.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0', borderBottom: i < arr.length - 1 ? '1px solid rgba(17,48,42,0.06)' : 'none' }}>
-                <div>
-                  <div style={{ fontFamily: C.ws, fontSize: 12, fontWeight: 500, color: C.text }}>{c.name}</div>
-                  <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim, marginTop: 2 }}>{c.meta}</div>
-                </div>
-                <Badge label={c.badge} color={c.color} />
-              </div>
-            ))}
-          </SectionCard>
-        </div>
-      </div>
-
-      {/* Consent forms */}
-      <SectionCard title="Consent Forms" sub="Required before photography, filming, or data collection" style={{ marginTop: 14 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8 }}>
-          {consentForms.map(({ icon, label, sub, url }) => (
-            <a key={label} href={url} target="_blank" rel="noreferrer"
-              style={{ padding: '10px 14px', background: C.cream, borderRadius: 4, textDecoration: 'none', display: 'block' }}>
-              <div style={{ fontFamily: C.sg, fontSize: 10, fontWeight: 700, color: C.forest, marginBottom: 2 }}>{icon} {label}</div>
-              <div style={{ fontFamily: C.ws, fontSize: 10, color: C.textDim }}>{sub}</div>
-            </a>
-          ))}
-        </div>
-      </SectionCard>
-    </div>
-  )
-}
-
-// ── Main app ─────────────────────────────────────────────────────
-
-const TABS = [
-  { id: 'overview',      label: 'Overview' },
-  { id: 'risks',         label: 'Risk Register' },
-  { id: 'controls',      label: 'Controls' },
-  { id: 'rhythm',        label: 'Compliance Rhythm' },
-  { id: 'safeguarding',  label: 'Safeguarding' },
+const WORKFLOWS = [
+  { id:'wf1',  num:'WF 1',  name:'New processing activity',         cadence:'Event-based', group:'event', trigger:'New data processing activity identified',       owner:'Belinda',            steps:'DPIA screening → RoPA entry → LIA if needed → DPA check' },
+  { id:'wf2',  num:'WF 2',  name:'Data breach',                     cadence:'Event-based', group:'event', trigger:'Suspected or confirmed data breach',             owner:'Belinda + Kate',     steps:'Severity score → 72hr ICO clock → CFC notify → data subjects' },
+  { id:'wf3',  num:'WF 3',  name:'Monthly risk review',             cadence:'Monthly',     group:'sched', trigger:'5th of each month',                             owner:'Belinda → Kate',     steps:'Risk Register sweep → Controls check → Monthly Risk Summary → Kate review by 10th' },
+  { id:'wf4',  num:'WF 4',  name:'Staff changes',                   cadence:'Event-based', group:'event', trigger:'New starter or leaver',                         owner:'Belinda',            steps:'Access provisioning → DBS check → NDA → training → offboarding checklist' },
+  { id:'wf5',  num:'WF 5',  name:'Annual compliance cycle',         cadence:'Annual',      group:'sched', trigger:'January each year',                             owner:'Belinda',            steps:'Full RoPA review → policy review → DPIA review → ICO horizon scan → SAT' },
+  { id:'wf6',  num:'WF 6',  name:'Client dependency monitoring',    cadence:'Monthly',     group:'sched', trigger:'1st of each month',                             owner:'Kate',               steps:'Update Revenue Concentration Tracker → quarterly review if threshold met' },
+  { id:'wf7',  num:'WF 7',  name:'Contract renewal & off-boarding', cadence:'Event-based', group:'event', trigger:'Contract end or 90-day flag',                   owner:'Kate + Belinda',     steps:'Data export → deletion confirmation → DPA closure → Kontainer export' },
+  { id:'wf8',  num:'WF 8',  name:'Reputational risk monitoring',    cadence:'Event-based', group:'event', trigger:'Press mention, complaint or incident',          owner:'Kate + Hannah',      steps:'Log in register → triage → response plan → ICO if applicable' },
+  { id:'wf9',  num:'WF 9',  name:'Due diligence readiness',         cadence:'Live now',    group:'live',  trigger:'Active — investment raise ongoing',             owner:'Kate + Belinda',     steps:'Pre-meeting checklist → Data Room audit → compliance narrative → investor update' },
+  { id:'wf10', num:'WF 10', name:'Research safeguarding',           cadence:'Event-based', group:'event', trigger:'New research project with participants',         owner:'Sumaiya + Belinda',  steps:'Risk assessment → consent via Kontainer → DBS checks → field safety briefing' },
+  { id:'wf11', num:'WF 11', name:'Staff & partner concerns',        cadence:'Event-based', group:'event', trigger:'Concern raised by staff or partner',            owner:'Sumaiya',            steps:'Triage → log in Safeguarding Register → escalate if needed → wellbeing support' },
+  { id:'wf12', num:'WF 12', name:'Safeguarding governance',         cadence:'Quarterly',   group:'sched', trigger:'End of each quarter',                           owner:'Sumaiya',            steps:'Quarterly review → DBS renewal check → training refresh → annual audit Dec' },
 ]
 
-export default function Dashboard() {
-  const [tab, setTab]           = useState('overview')
-  const [risks, setRisks]       = useState(null)
-  const [controls, setControls] = useState(null)
-  const [tracker, setTracker]   = useState(null)
-  const [loading, setLoading]   = useState({ risks: true, controls: true, tracker: true })
-  const [errors, setErrors]     = useState({})
-  const [lastSync, setLastSync] = useState(null)
-  const [syncing, setSyncing]   = useState(false)
+const WF_GROUPS = [
+  { key:'live',  label:'Active now' },
+  { key:'sched', label:'Scheduled — runs on a fixed cycle' },
+  { key:'event', label:'Event-based — triggered when something happens' },
+]
 
-  const load = useCallback(async () => {
-    setSyncing(true)
-    setLoading({ risks: true, controls: true, tracker: true })
-    setErrors({})
-    const run = async (key, fn, set) => {
-      try { set(await fn()) }
-      catch (e) { setErrors(p => ({ ...p, [key]: e.message })) }
-      finally { setLoading(p => ({ ...p, [key]: false })) }
-    }
-    await Promise.all([
-      run('risks',    fetchRisks,    setRisks),
-      run('controls', fetchControls, setControls),
-      run('tracker',  fetchTracker,  setTracker),
-    ])
-    setLastSync(new Date())
-    setSyncing(false)
-  }, [])
+function WorkflowsAccordion() {
+  const [open, setOpen] = useState(null)
+  return (
+    <Panel title="Workflows" source="" className="workflow-panel">
+      <div className="workflow-groups">
+        {WF_GROUPS.map(g => (
+          <div key={g.key} className="wf-group-col">
+            <div className="wf-group-label">{g.label}</div>
+            {WORKFLOWS.filter(w => w.group === g.key).map(wf => {
+              const isOpen = open === wf.id
+              return (
+                <div key={wf.id} className="wf-item">
+                  <button type="button" className="wf-row" onClick={() => setOpen(isOpen ? null : wf.id)}>
+                    <span className="wf-num">{wf.num}</span>
+                    <span className="wf-name">{wf.name}</span>
+                    <span className={`wf-cadence cadence-${wf.cadence.toLowerCase().replace(/\s/g,'-')}`}>{wf.cadence}</span>
+                    <span className={`wf-chev${isOpen ? ' open' : ''}`}>⌄</span>
+                  </button>
+                  {isOpen && (
+                    <div className="wf-detail">
+                      <div className="wf-detail-grid">
+                        <div><div className="wfd-lbl">Trigger</div><div className="wfd-val">{wf.trigger}</div></div>
+                        <div><div className="wfd-lbl">Owner</div><div className="wfd-val">{wf.owner}</div></div>
+                        <div><div className="wfd-lbl">Key steps</div><div className="wfd-val">{wf.steps}</div></div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        ))}
+      </div>
+    </Panel>
+  )
+}
 
-  useEffect(() => { load() }, [load])
+function Overview({ risks, controls, tracker, onOpen }) {
+  const active    = controls.byStatus.Active || 0
+  const available = tracker.total - (tracker.byStatus.Skipped || 0)
+  const metrics = [
+    { label:'Total risks',      value:risks.total,                                                            onClick:() => onOpen('risks','all') },
+    { label:'High probability', value:risks.byProbability.High||0,      tone:'critical',                      onClick:() => onOpen('risks','high') },
+    { label:'Open risks',       value:risks.byCategory.Open||0,         tone:'attention',                     onClick:() => onOpen('risks','open') },
+    { label:'Controls active',  value:`${controls.total ? Math.round(active/controls.total*100) : 0}%`,      onClick:() => onOpen('controls','all') },
+    { label:'Activities done',  value:`${available ? Math.round((tracker.byStatus.Done||0)/available*100) : 0}%`, tone:'good', onClick:() => onOpen('actions','Done') },
+    { label:'Overdue',          value:tracker.byStatus.Overdue||0,      tone:'critical',                      onClick:() => onOpen('actions','Overdue') },
+  ]
+  const recurring = tracker.items
+    .filter(i => i.frequency && RECURRING.includes(i.frequency) && !['Done','Skipped'].includes(i.status))
+    .sort((a,b) => (a.dueDate||'9999').localeCompare(b.dueDate||'9999'))
+    .slice(0,8)
+  return (
+    <>
+      <MetricBand metrics={metrics} />
+      <div className="two-columns">
+        <Panel title="Risk Register — By Domain" source="Unified Risk Register">
+          <DomainRiskList risks={risks} />
+        </Panel>
+        <Panel title="Recurring Governance Tasks" source="Governance Tracker">
+          <TaskRows items={recurring} />
+        </Panel>
+      </div>
+      <WorkflowsAccordion />
+    </>
+  )
+}
 
-  const currentTab = TABS.find(t => t.id === tab)
+/* ══════════════════════════════════════════════════════════
+   MY ACTIONS
+   ════════════════════════════════════════════════════════ */
+function MyActions({ tracker, filter, onFilter }) {
+  const [view, setView] = useState('list')
+  const [localDone, setLocalDone] = useState(new Set())
+  const handleDone = id => setLocalDone(prev => new Set([...prev, id]))
+
+  const allItems = [...tracker.items].sort((a,b) => (a.dueDate||'9999').localeCompare(b.dueDate||'9999'))
+
+  // Hide done tasks from list/calendar; show completed count card instead
+  const activeSrc = allItems.filter(i => !['Done','Skipped'].includes(i.status) && !localDone.has(i.id))
+  const doneCount = allItems.filter(i => i.status === 'Done' || localDone.has(i.id)).length
+
+  const items = activeSrc.filter(i => filter === 'all' || i.status === filter)
+  const urgent  = items.filter(i => i.priority === 'High' && i.status === 'To Do' && i.dueDate && new Date(i.dueDate) <= new Date(Date.now() + 4*86400000))
+  const overdue = items.filter(i => i.status === 'Overdue')
+  const inprog  = items.filter(i => i.status === 'In Progress')
+  const todo    = items.filter(i => i.status === 'To Do' && !urgent.includes(i))
 
   return (
-    <div style={{ minHeight: '100vh', background: C.cream, fontFamily: C.ws }}>
-      <style>{GLOBAL_CSS}</style>
-
-      {/* Header */}
-      <div style={{ background: C.forest, borderBottom: `3px solid ${C.amber}`, position: 'sticky', top: 0, zIndex: 100 }}>
-        <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0 40px', height: 64, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
-            <span style={{ fontFamily: C.sg, fontSize: 20, fontWeight: 700, color: C.cream, letterSpacing: '-0.01em' }}>
-              CONNECT<span style={{ color: C.amber }}>GO</span>
-            </span>
-            <span style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 600, letterSpacing: '0.16em', textTransform: 'uppercase', color: 'rgba(245,242,236,0.38)' }}>
-              Governance &amp; Compliance
-            </span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            {lastSync && (
-              <span style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'rgba(245,242,236,0.35)' }}>
-                LAST SYNC: {lastSync.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-              </span>
-            )}
-            <button onClick={load} disabled={syncing} style={{
-              background: syncing ? 'rgba(255,255,255,0.06)' : `${C.yellow}22`,
-              border: `1px solid ${syncing ? 'rgba(255,255,255,0.12)' : C.yellow}`,
-              borderRadius: 3, padding: '7px 14px',
-              fontFamily: C.sg, fontSize: 10, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase',
-              color: syncing ? 'rgba(255,255,255,0.25)' : C.yellow,
-              cursor: syncing ? 'not-allowed' : 'pointer', transition: 'all 0.2s',
-            }}>
-              {syncing ? '↻ Syncing…' : '↻ Sync'}
-            </button>
-            <a href="/.netlify/functions/auth?action=logout" style={{
-              border: '1px solid rgba(255,255,255,0.12)', borderRadius: 3, padding: '7px 14px',
-              fontFamily: C.sg, fontSize: 10, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase',
-              color: 'rgba(245,242,236,0.5)', textDecoration: 'none',
-            }}>
-              Sign out
-            </a>
-          </div>
-        </div>
-
-        {/* Tabs */}
-        <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0 40px', display: 'flex', gap: 28 }}>
-          {TABS.map(t => (
-            <button key={t.id} onClick={() => setTab(t.id)} style={{
-              padding: '0 0 14px', background: 'none', border: 'none',
-              borderBottom: `2px solid ${tab === t.id ? C.yellow : 'transparent'}`,
-              fontFamily: C.sg, fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase',
-              color: tab === t.id ? C.yellow : 'rgba(245,242,236,0.45)',
-              cursor: 'pointer', transition: 'all 0.18s', whiteSpace: 'nowrap',
-            }}>{t.label}</button>
+    <>
+      <div className="actions-header">
+        <div className="view-toggle">
+          {[['list','List'],['cal','Calendar']].map(([v,l]) => (
+            <button key={v} type="button" className={view===v?'selected':''} onClick={() => setView(v)}>{l}</button>
           ))}
         </div>
+        <FilterBar value={filter} onChange={onFilter} options={[['all','All'],['To Do','To Do'],['In Progress','In Progress'],['Overdue','Overdue']]} />
       </div>
 
-      {/* Page label */}
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '20px 40px 8px' }}>
-        <div style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: C.textDim }}>
-          {currentTab?.label?.toUpperCase()} — CONNECTGO LIMITED
+      {/* Completed tasks summary card */}
+      <div className="done-card">
+        <strong>{doneCount}</strong>
+        <span>tasks completed to date</span>
+        <a href="https://www.notion.so" target="_blank" rel="noreferrer" className="done-link">View in Notion ↗</a>
+      </div>
+
+      {view === 'list' && (
+        <div className="actions-list">
+          {urgent.length > 0 && <div className="action-group"><div className="action-group-title critical">Urgent — due within 4 days <span className="count-badge">{urgent.length}</span></div>{urgent.map(i => <CheckRow key={i.id} item={i} onDone={handleDone} />)}</div>}
+          {overdue.length > 0 && <div className="action-group"><div className="action-group-title attention">Overdue <span className="count-badge">{overdue.length}</span></div>{overdue.map(i => <CheckRow key={i.id} item={i} onDone={handleDone} />)}</div>}
+          {inprog.length > 0  && <div className="action-group"><div className="action-group-title">In progress <span className="count-badge">{inprog.length}</span></div>{inprog.map(i => <CheckRow key={i.id} item={i} onDone={handleDone} />)}</div>}
+          {todo.length > 0    && <div className="action-group"><div className="action-group-title">To do <span className="count-badge">{todo.length}</span></div>{todo.map(i => <CheckRow key={i.id} item={i} onDone={handleDone} />)}</div>}
+          {items.length === 0 && <p className="empty">No open actions{filter !== 'all' ? ' matching this filter' : ''}</p>}
         </div>
-      </div>
+      )}
 
-      {/* Content */}
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '14px 40px 52px' }}>
-        {tab === 'overview'     && <OverviewTab     risks={risks} controls={controls} tracker={tracker} loading={loading} errors={errors} />}
-        {tab === 'risks'        && <RisksTab        risks={risks} loading={loading} errors={errors} />}
-        {tab === 'controls'     && <ControlsTab     controls={controls} loading={loading} errors={errors} />}
-        {tab === 'rhythm'       && <RhythmTab       tracker={tracker} loading={loading} errors={errors} />}
-        {tab === 'safeguarding' && <SafeguardingTab risks={risks} loading={loading} errors={errors} />}
-      </div>
+      {view === 'cal' && <CalendarView tracker={{ ...tracker, items: activeSrc }} />}
+    </>
+  )
+}
 
-      {/* Footer */}
-      <div style={{ borderTop: `1px solid ${C.border}`, padding: '14px 40px', maxWidth: 1400, margin: '0 auto', display: 'flex', justifyContent: 'space-between' }}>
-        <span style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim }}>
-          ConnectGo Ltd · ICO Registered · Dr Kate McAlpine, Director
-        </span>
-        <span style={{ fontFamily: C.sg, fontSize: 9, fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase', color: C.textDim }}>
-          Confidential
-        </span>
+/* ── Calendar ────────────────────────────────────────────── */
+function CalendarView({ tracker }) {
+  const [offset, setOffset] = useState(0)
+  const now  = new Date()
+  const base = new Date(now.getFullYear(), now.getMonth() + offset, 1)
+  const year = base.getFullYear()
+  const month = base.getMonth()
+  const monthLabel = base.toLocaleString('en-GB', { month: 'long', year: 'numeric' })
+  const startOffset = (() => { const d = base.getDay(); return d === 0 ? 6 : d - 1 })()
+  const daysInMonth = new Date(year, month + 1, 0).getDate()
+  const byDate = {}
+  tracker.items.forEach(i => {
+    if (!i.dueDate) return
+    const d = i.dueDate.slice(0,10)
+    if (!byDate[d]) byDate[d] = []
+    byDate[d].push(i)
+  })
+  const cells = [...Array(startOffset).fill(null), ...Array.from({length:daysInMonth},(_,k)=>k+1)]
+  return (
+    <div className="cal-wrap">
+      <div className="cal-hdr">
+        <button type="button" className="cal-nav" onClick={() => setOffset(o=>o-1)}>‹ Prev</button>
+        <strong>{monthLabel}</strong>
+        <button type="button" className="cal-nav" onClick={() => setOffset(o=>o+1)}>Next ›</button>
+      </div>
+      <div className="cal-legend">
+        {[['ce-r','Overdue'],['ce-a','To Do'],['ce-g','Done'],['ce-b','Recurring']].map(([cls,lbl])=>(
+          <span key={cls} className="cal-leg-item"><span className={`cal-leg-dot ${cls}`}/>{lbl}</span>
+        ))}
+      </div>
+      <div className="cal-grid">
+        {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=><div key={d} className="cal-dh">{d}</div>)}
+        {cells.map((d,idx) => {
+          if (!d) return <div key={`b${idx}`} className="cal-day blank"/>
+          const key=`${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`
+          const tasks=byDate[key]||[]
+          const isToday=now.getDate()===d&&now.getMonth()===month&&now.getFullYear()===year
+          const hasUrgent=tasks.some(t=>t.status==='Overdue'||t.priority==='High')
+          return (
+            <div key={d} className={`cal-day${isToday?' today':''}${hasUrgent?' has-urgent':''}`}>
+              <div className="cal-dn">{d}</div>
+              {tasks.slice(0,2).map(t=>(
+                <a key={t.id} href={t.url} target="_blank" rel="noreferrer"
+                   className={`cal-ev ${t.status==='Overdue'?'ce-r':t.status==='Done'?'ce-g':t.frequency?'ce-b':'ce-a'}`}
+                   title={t.name}>{t.name}</a>
+              ))}
+              {tasks.length>2&&<div className="cal-more">+{tasks.length-2} more</div>}
+            </div>
+          )
+        })}
       </div>
     </div>
+  )
+}
+
+/* ══════════════════════════════════════════════════════════
+   RISK REGISTER
+   ════════════════════════════════════════════════════════ */
+function RiskRegister({ risks, filter, onFilter }) {
+  const [domainFilter, setDomainFilter] = useState(null)
+  const [search, setSearch] = useState('')
+  const rows = risks.items.filter(i => {
+    const mDomain = !domainFilter || i.domain === domainFilter
+    const mFilter = filter==='all'||(filter==='high'&&i.probability==='High')||(filter==='open'&&i.category==='Open')
+    const mSearch = !search || i.name?.toLowerCase().includes(search.toLowerCase()) || i.domain?.toLowerCase().includes(search.toLowerCase()) || i.owner?.toLowerCase().includes(search.toLowerCase())
+    return mDomain && mFilter && mSearch
+  })
+  return (
+    <>
+      <div className="search-filter-row">
+        <SearchBox value={search} onChange={setSearch} placeholder="Search risks…" />
+        <FilterBar value={filter} onChange={f=>{onFilter(f);setDomainFilter(null)}} options={[['all','All risks'],['high','High probability'],['open','Open risks']]} />
+      </div>
+      <Panel title="Risk Register — By Domain" source="Unified Risk Register">
+        <div className="bars">
+          {Object.entries(risks.byDomain||{}).filter(([,v])=>v).map(([label,value])=>(
+            <button type="button" key={label} onClick={()=>setDomainFilter(domainFilter===label?null:label)} className={domainFilter===label?'bar-active':''}>
+              <span>{label}</span>
+              <i><em style={{width:`${risks.total?value/risks.total*100:0}%`}}/></i>
+              <b>{value}</b>
+            </button>
+          ))}
+        </div>
+        {domainFilter && <div className="domain-active-label">Showing {domainFilter}<button type="button" className="domain-clear" onClick={()=>setDomainFilter(null)}>✕ Clear</button></div>}
+      </Panel>
+      <Panel title="Risk Register — Records" source={`Unified Risk Register${rows.length!==risks.total?` · ${rows.length} shown`:''}`}>
+        <ScrollTable
+          items={rows}
+          minWidth={1700}
+          columns="68px minmax(240px,2.1fr) minmax(120px,1fr) minmax(120px,1fr) 100px minmax(140px,1.1fr) minmax(130px,1fr) minmax(130px,1fr) 110px 130px"
+          head={<><span>{risks.columns?.riskId || 'Risk ID'}</span><span>{risks.columns?.title || 'Risk'}</span><span>{risks.columns?.owner || 'Risk Owner'}</span><span>{risks.columns?.domain || 'Domain'}</span><span>{risks.columns?.probability || 'Probability'}</span><span>{risks.columns?.consequences || 'Consequences'}</span><span>{risks.columns?.controlStatus || 'Control Status'}</span><span>{risks.columns?.category || 'Risk Category'}</span><span>{risks.columns?.reviewDate || 'Review Date'}</span><span>{risks.columns?.reviewFrequency || 'Review Frequency'}</span></>}
+          row={item => (
+            <div className="table-row risk-table-row" key={item.id}>
+              <span>{item.riskId ?? '—'}</span>
+              <NotionLink item={item}>{item.name}</NotionLink>
+              <span>{item.owner||'—'}</span>
+              <span>{item.domain||'—'}</span>
+              <Badge>{item.probability}</Badge>
+              <span>{item.consequences||'—'}</span>
+              <Badge>{item.controlStatus}</Badge>
+              <Badge>{item.category}</Badge>
+              <time>{formatDate(item.reviewDate)}</time>
+              <span>{item.reviewFrequency||'—'}</span>
+            </div>
+          )}
+        />
+      </Panel>
+    </>
+  )
+}
+
+/* ══════════════════════════════════════════════════════════
+   CONTROLS
+   ════════════════════════════════════════════════════════ */
+function Controls({ controls, filter, onFilter }) {
+  const [search, setSearch] = useState('')
+  const rows = controls.items.filter(i => {
+    const mFilter = filter==='all'||i.status===filter
+    const mSearch = !search || i.name?.toLowerCase().includes(search.toLowerCase()) || i.domain?.toLowerCase().includes(search.toLowerCase())
+    return mFilter && mSearch
+  })
+  const c = controls.byStatus
+  return (
+    <>
+      <section className="state-band">
+        <div><strong>{c.Active||0}</strong><span>Active</span></div>
+        <div><strong>{c.Partial||0}</strong><span>Partial</span></div>
+        <div><strong>{c['Not In Place']||0}</strong><span>Not in place</span></div>
+        <div><strong>{controls.total?`${Math.round((c.Active||0)/controls.total*100)}%`:'0%'}</strong><span>Controls active</span></div>
+      </section>
+      <div className="search-filter-row">
+        <SearchBox value={search} onChange={setSearch} placeholder="Search controls…" />
+        <FilterBar value={filter} onChange={onFilter} options={[['all','All controls'],['Active','Active'],['Partial','Partial'],['Not In Place','Not in place']]} />
+      </div>
+      <Panel title="Controls Register" source="Controls Register">
+        <ScrollTable
+          items={rows}
+          minWidth={1450}
+          columns="80px minmax(240px,2fr) minmax(120px,1fr) minmax(130px,1fr) 105px minmax(120px,1fr) 110px 135px"
+          head={<><span>{controls.columns?.controlId || 'Control ID'}</span><span>{controls.columns?.title || 'Control'}</span><span>{controls.columns?.domain || 'Domain'}</span><span>{controls.columns?.type || 'Control Type'}</span><span>{controls.columns?.status || 'Status'}</span><span>{controls.columns?.owner || 'Owner'}</span><span>{controls.columns?.reviewDate || 'Review Date'}</span><span>{controls.columns?.reviewFrequency || 'Review Frequency'}</span></>}
+          row={item => (
+            <div className="table-row controls-table-row" key={item.id}>
+              <span>{item.controlId ?? '—'}</span>
+              <NotionLink item={item}>{item.name}</NotionLink>
+              <span>{item.domain||'—'}</span>
+              <span>{item.type||'—'}</span>
+              <Badge>{item.status}</Badge>
+              <span>{item.owner||'—'}</span>
+              <time>{formatDate(item.reviewDate)}</time>
+              <span>{item.reviewFrequency||'—'}</span>
+            </div>
+          )}
+        />
+      </Panel>
+    </>
+  )
+}
+
+/* ══════════════════════════════════════════════════════════
+   SAFEGUARDING
+   ════════════════════════════════════════════════════════ */
+function Safeguarding({ tracker, risks, controls }) {
+  const taskRows    = tracker.items.filter(i => i.domain==='Safeguarding')
+  const riskRows    = risks.items.filter(i => i.domain==='Safeguarding')
+  const controlRows = controls.items.filter(i => i.domain==='Safeguarding')
+  const openTasks   = taskRows.filter(i => !['Done','Skipped'].includes(i.status))
+  return (
+    <>
+      <section className="state-band">
+        <div><strong>{openTasks.length}</strong><span>Open activities</span></div>
+        <div><strong>{taskRows.filter(i=>i.status==='Overdue').length}</strong><span>Overdue</span></div>
+        <div><strong>{riskRows.length}</strong><span>Risks</span></div>
+        <div><strong>{controlRows.filter(i=>i.status==='Active').length}</strong><span>Controls active</span></div>
+      </section>
+      <div className="two-columns">
+        <Panel title="Governance Tracker" source="Governance Tracker"><TaskRows items={taskRows} /></Panel>
+        <Panel title="Risk Register" source="Unified Risk Register"><TaskRows items={riskRows.map(i=>({...i,activityId:i.riskId,dueDate:i.reviewDate,status:i.controlStatus}))} /></Panel>
+      </div>
+      <Panel title="Controls Register" source="Controls Register"><TaskRows items={controlRows.map(i=>({...i,activityId:i.controlId,dueDate:i.reviewDate,status:i.status}))} /></Panel>
+    </>
+  )
+}
+
+/* ══════════════════════════════════════════════════════════
+   DOCUMENT LIBRARY
+   ════════════════════════════════════════════════════════ */
+function DocumentLibrary({ documents, filter, onFilter }) {
+  const [search, setSearch] = useState('')
+  const rows = documents.items.filter(i => {
+    const mFilter = filter==='all'||i.status===filter
+    const mSearch = !search || i.name?.toLowerCase().includes(search.toLowerCase()) || i.domain?.toLowerCase().includes(search.toLowerCase()) || (i.docId && String(i.docId).includes(search))
+    return mFilter && mSearch
+  })
+  return (
+    <>
+      <MetricBand metrics={[
+        { label:'Approved',       value:documents.byStatus.Approved||0,          tone:'good',      onClick:()=>onFilter('Approved') },
+        { label:'In review',      value:documents.byStatus['In review']||0,                        onClick:()=>onFilter('In review') },
+        { label:'To be reviewed', value:documents.byStatus['To be reviewed']||0, tone:'attention', onClick:()=>onFilter('To be reviewed') },
+        { label:'Documents',      value:documents.total,                                            onClick:()=>onFilter('all') },
+      ]} />
+      <div className="search-filter-row">
+        <SearchBox value={search} onChange={setSearch} placeholder="Search documents…" />
+        <FilterBar value={filter} onChange={onFilter} options={[['all','All documents'],['Approved','Approved'],['In review','In review'],['To be reviewed','To be reviewed']]} />
+      </div>
+      <Panel title="Document Library" source="Document Library">
+        <ScrollTable
+          items={rows}
+          minWidth={1520}
+          columns="68px minmax(230px,2fr) minmax(120px,1fr) minmax(110px,.9fr) minmax(120px,1fr) 105px 115px 120px 130px"
+          head={<><span>{documents.columns?.docId || 'Doc ID'}</span><span>{documents.columns?.title || 'Document'}</span><span>{documents.columns?.domain || 'Domain'}</span><span>{documents.columns?.type || 'Type'}</span><span>{documents.columns?.owner || 'Owner'}</span><span>{documents.columns?.status || 'Status'}</span><span>{documents.columns?.reviewCycle || 'Review Cycle'}</span><span>{documents.columns?.nextReviewDate || 'Next Review Date'}</span><span>{documents.columns?.nextApprovalDate || 'Next Approval Date'}</span></>}
+          row={item => (
+            <div className="table-row document-table-row" key={item.id}>
+              <span>{item.docId ?? '—'}</span>
+              <NotionLink item={item}>{item.name}</NotionLink>
+              <span>{item.domain||'—'}</span>
+              <span>{item.type||'—'}</span>
+              <span>{item.owner||'—'}</span>
+              <Badge>{item.status}</Badge>
+              <span>{item.reviewCycle||'—'}</span>
+              <time>{formatDate(item.nextReviewDate)}</time>
+              <time>{formatDate(item.nextApprovalDate)}</time>
+            </div>
+          )}
+        />
+      </Panel>
+    </>
+  )
+}
+
+/* ══════════════════════════════════════════════════════════
+   RoPA
+   ════════════════════════════════════════════════════════ */
+function RoPA({ ropa, filter, onFilter }) {
+  const rows = ropa.items.filter(i => filter==='all'||i.flag===filter)
+  const flags = [...new Set(ropa.items.map(i=>i.flag).filter(Boolean))]
+  return (
+    <>
+      <MetricBand metrics={[
+        { label:'Processing activities', value:ropa.total,                     onClick:()=>onFilter('all') },
+        { label:'Reviewed',              value:ropa.byFlag.Reviewed||0,        tone:'good',      onClick:()=>onFilter('Reviewed') },
+        { label:'LIA needed',            value:ropa.byFlag['LIA needed']||0,   tone:'attention', onClick:()=>onFilter('LIA needed') },
+        { label:'Review due',            value:ropa.byFlag['Review due']||0,                     onClick:()=>onFilter('Review due') },
+      ]} />
+      <FilterBar value={filter} onChange={onFilter} options={[['all','All processing'],...flags.map(f=>[f,f])]} />
+      <Panel title="Register of Processing Activities" source="RoPA">
+        <ScrollTable
+          items={rows}
+          minWidth={1640}
+          columns="minmax(220px,1.8fr) minmax(130px,1fr) minmax(140px,1.1fr) minmax(150px,1.2fr) minmax(120px,.9fr) minmax(130px,1fr) 110px minmax(120px,1fr) 110px"
+          head={<><span>{ropa.columns?.title || 'Processing Activity'}</span><span>{ropa.columns?.subjects || 'Data Subjects'}</span><span>{ropa.columns?.personalData || 'Personal Data'}</span><span>{ropa.columns?.purpose || 'Purpose'}</span><span>{ropa.columns?.basis || 'Lawful Basis'}</span><span>{ropa.columns?.systems || 'Systems'}</span><span>{ropa.columns?.retention || 'Retention'}</span><span>{ropa.columns?.owner || 'Owner'}</span><span>{ropa.columns?.flag || 'Flag'}</span></>}
+          row={item => (
+            <div className="table-row ropa-table-row" key={item.id}>
+              <NotionLink item={item}>{item.name}</NotionLink>
+              <span>{item.subjects||'—'}</span>
+              <span>{item.personalData||'—'}</span>
+              <span>{item.purpose||'—'}</span>
+              <span>{item.basis||'—'}</span>
+              <span>{item.systems||'—'}</span>
+              <span>{item.retention||'—'}</span>
+              <span>{item.owner||'—'}</span>
+              <Badge>{item.flag}</Badge>
+            </div>
+          )}
+        />
+      </Panel>
+    </>
+  )
+}
+
+/* ══════════════════════════════════════════════════════════
+   IT TOOLS
+   ════════════════════════════════════════════════════════ */
+function ITTools({ tools, filter, onFilter }) {
+  const [retiredOpen, setRetiredOpen] = useState(false)
+  // Active = anything not retired
+  const RETIRED_VALS = ['Retired','Decommissioned','Legacy','Inactive']
+  const isRetired = i => RETIRED_VALS.some(v => i.criticality===v || i.name?.toLowerCase().includes('retired') || i.category?.toLowerCase().includes('retired'))
+  const active  = tools.items.filter(i => !isRetired(i))
+  const retired = tools.items.filter(i => isRetired(i))
+  const rows = active.filter(i =>
+    filter==='all'||
+    (filter==='critical'&&i.criticality==='Critical')||
+    (filter==='dpa'&&i.dpa==='Pending')||
+    (filter==='mfa'&&i.mfa!=='Enabled')
+  )
+  const critical   = active.filter(i=>i.criticality==='Critical').length
+  const dpaPending = active.filter(i=>i.dpa==='Pending').length
+  const mfaEnabled = active.filter(i=>i.mfa==='Enabled').length
+  const ToolRow = item => (
+    <div className="table-row tools-table-row" key={item.id}>
+      <NotionLink item={item}>{item.name}</NotionLink>
+      <span>{item.category||'—'}</span>
+      <span>{item.owner||'—'}</span>
+      <Badge>{item.criticality}</Badge>
+      <Badge>{item.dpa}</Badge>
+      <Badge>{item.mfa}</Badge>
+      <time>{formatDate(item.reviewDate)}</time>
+    </div>
+  )
+  return (
+    <>
+      <MetricBand metrics={[
+        { label:'Active tools',         value:active.length, onClick:()=>onFilter('all') },
+        { label:'Critical suppliers',   value:critical,      tone:'critical', onClick:()=>onFilter('critical') },
+        { label:'DPA pending',          value:dpaPending,    tone:'critical', onClick:()=>onFilter('dpa') },
+        { label:'MFA enabled',          value:mfaEnabled,    tone:'good',     onClick:()=>onFilter('mfa') },
+      ]} />
+      <FilterBar value={filter} onChange={onFilter} options={[['all','All tools'],['critical','Critical'],['dpa','DPA pending'],['mfa','MFA not enabled']]} />
+      <Panel title="Access Matrix — Active Tools" source="Access Matrix">
+        <ScrollTable
+          items={rows}
+          minWidth={1220}
+          columns="minmax(220px,1.8fr) 1fr 1fr .9fr .9fr .9fr .9fr"
+          head={<><span>{tools.columns?.title || 'Tool / Supplier'}</span><span>{tools.columns?.category || 'Category'}</span><span>{tools.columns?.owner || 'Owner'}</span><span>{tools.columns?.criticality || 'Criticality'}</span><span>{tools.columns?.dpa || 'DPA'}</span><span>{tools.columns?.mfa || 'MFA'}</span><span>{tools.columns?.reviewDate || 'Next Review'}</span></>}
+          row={ToolRow}
+        />
+        {retired.length > 0 && (
+          <div className="retired-section">
+            <button type="button" className="retired-toggle" onClick={()=>setRetiredOpen(o=>!o)}>
+              <span>Retired / decommissioned tools ({retired.length})</span>
+              <span className={`wf-chev${retiredOpen?' open':''}`}>⌄</span>
+            </button>
+            {retiredOpen && (
+              <div style={{marginTop:8}}>
+                <ScrollTable items={retired} minWidth={1220} columns="minmax(220px,1.8fr) 1fr 1fr .9fr .9fr .9fr .9fr" head={<><span>{tools.columns?.title || 'Tool / Supplier'}</span><span>{tools.columns?.category || 'Category'}</span><span>{tools.columns?.owner || 'Owner'}</span><span>{tools.columns?.criticality || 'Criticality'}</span><span>{tools.columns?.dpa || 'DPA'}</span><span>{tools.columns?.mfa || 'MFA'}</span><span>{tools.columns?.reviewDate || 'Next Review'}</span></>} row={ToolRow} />
+              </div>
+            )}
+          </div>
+        )}
+      </Panel>
+    </>
+  )
+}
+
+/* ══════════════════════════════════════════════════════════
+   STYLES
+   ════════════════════════════════════════════════════════ */
+function DashboardStyles() {
+  return <style>{`
+    @import url('https://fonts.googleapis.com/css2?family=Work+Sans:wght@400;500;600;700&display=swap');
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f7f4ee; color: #19332d; font-family: 'Work Sans', sans-serif; }
+    button, select, input { font: inherit; }
+    button { cursor: pointer; }
+    .hub { min-height: 100vh; }
+
+    /* header */
+    .site-header { align-items: center; background: #17332d; color: #fff; display: flex; justify-content: space-between; min-height: 64px; padding: 0 4rem; }
+    .brand { align-items: baseline; display: flex; gap: 14px; }
+    .brand h1 { color: #fff; font-size: 25px; letter-spacing: -.07em; margin: 0; }
+    .brand h1 span { color: #e7a642; }
+    .brand p { color: rgba(255,255,255,.52); font-size: 10px; font-weight: 600; letter-spacing: .13em; margin: 0; text-transform: uppercase; }
+    .header-actions { align-items: center; display: flex; gap: 10px; }
+    .header-actions small { color: rgba(255,255,255,.5); font-size: 10px; }
+    .header-actions select { background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.24); color: #fff; font-size: 11px; padding: 7px 9px; }
+    .header-actions option { color: #19332d; }
+    .header-actions .sign-out { border: 1px solid rgba(255,255,255,.24); color: rgba(255,255,255,.7); font-size: 10px; font-weight: 600; letter-spacing: .09em; padding: 7px 12px; text-decoration: none; text-transform: uppercase; }
+    .header-actions .sign-out:hover { color: #fff; }
+
+    /* nav */
+    .tab-nav { background: #17332d; display: flex; flex-wrap: wrap; padding: 0 3.25rem; }
+    .tab-nav button { background: transparent; border: 0; border-bottom: 3px solid transparent; color: rgba(255,255,255,.52); font-size: 10px; font-weight: 600; letter-spacing: .09em; padding: 11px 13px 9px; text-transform: uppercase; }
+    .tab-nav button:hover { color: #fff; }
+    .tab-nav button.active { border-bottom-color: #e7a642; color: #fff; }
+
+    /* content */
+    .content { margin: 0 auto; max-width: 1500px; padding: 31px 4rem 52px; }
+    .eyebrow { border-bottom: 1px solid #d8dfd9; color: #486058; font-size: 11px; font-weight: 600; letter-spacing: .12em; margin-bottom: 20px; padding-bottom: 14px; text-transform: uppercase; }
+
+    /* metric band */
+    .metric-band { background: #17332d; display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); margin-bottom: 20px; }
+    .metric-band button { background: transparent; border: 0; border-left: 1px solid rgba(255,255,255,.14); color: #fff; min-height: 104px; padding: 19px 20px; text-align: left; }
+    .metric-band button:first-child { border-left: 0; }
+    .metric-band button:hover { background: #24453d; box-shadow: inset 0 -3px #e7a642; }
+    .metric-band span { color: rgba(255,255,255,.55); display: block; font-size: 9px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+    .metric-band strong { color: #fff; display: block; font-size: 31px; letter-spacing: -.06em; margin-top: 12px; }
+    .metric-band strong.critical { color: #f1b0a8; }
+    .metric-band strong.attention { color: #f2cc82; }
+    .metric-band strong.good { color: #a8d6b5; }
+
+    /* layout */
+    .two-columns { display: grid; gap: 16px; grid-template-columns: minmax(0,1.1fr) minmax(300px,.9fr); margin-bottom: 20px; align-items: start; }
+
+    /* panels */
+    .panel { background: #fffdf8; border: 1px solid #dbe3dd; border-top: 3px solid #31594f; margin-bottom: 20px; min-width: 0; padding: 0 20px 16px; }
+    .two-columns .panel { margin-bottom: 0; }
+    .panel-heading { align-items: center; border-bottom: 1px solid #e0e6e1; display: flex; justify-content: space-between; margin-bottom: 8px; padding: 15px 0 12px; }
+    .panel-heading h2 { font-size: 12px; letter-spacing: .08em; margin: 0; text-transform: uppercase; }
+    .panel-heading span { border-bottom: 1px solid #bfd0c7; color: #547168; font-size: 9px; font-weight: 600; letter-spacing: .08em; padding-bottom: 2px; text-transform: uppercase; }
+
+    /* bars */
+    .bars > div, .bars > button { align-items: center; background: transparent; border: 0; border-bottom: 1px solid #e4e9e5; color: #19332d; display: grid; gap: 12px; grid-template-columns: minmax(100px,1fr) minmax(100px,2fr) 28px; padding: 12px 0; text-align: left; width: 100%; }
+    .bars > div:last-child, .bars > button:last-child { border-bottom: 0; }
+    .bars > button:hover { background: #f4f7f4; padding-left: 7px; }
+    .bars > button.bar-active { background: #eef4ee; }
+    .bars span { font-size: 12px; font-weight: 600; }
+    .bars i { background: #e4eae6; height: 5px; }
+    .bars em { background: #31594f; display: block; height: 100%; }
+    .bars b { font-size: 12px; text-align: right; }
+    .domain-active-label { align-items: center; border-top: 1px solid #e4e9e6; color: #486058; display: flex; font-size: 10px; font-weight: 600; gap: 10px; justify-content: space-between; letter-spacing: .05em; padding: 8px 4px; text-transform: uppercase; }
+    .domain-clear { background: transparent; border: 1px solid #ced8d2; color: #60726b; font-size: 10px; padding: 3px 8px; }
+    .domain-clear:hover { background: #31594f; border-color: #31594f; color: #fff; }
+
+    /* domain collapsible list */
+    .domain-item { border-bottom: 1px solid #e4e9e6; }
+    .domain-item:last-child { border-bottom: 0; }
+    .domain-row { align-items: center; background: transparent; border: 0; cursor: pointer; display: grid; gap: 12px; grid-template-columns: minmax(100px,1fr) minmax(100px,2fr) 28px 18px; padding: 12px 4px; text-align: left; width: 100%; }
+    .domain-row:hover { background: #f4f8f4; }
+    .domain-name { font-size: 12px; font-weight: 600; }
+    .domain-bar-track { background: #e4eae6; height: 5px; }
+    .domain-bar-track em { background: #31594f; display: block; height: 100%; }
+    .domain-count { font-size: 12px; text-align: right; }
+    .domain-risks { background: #f7faf7; border-top: 1px solid #e4e9e6; padding: 8px 12px 8px 20px; }
+    .domain-risk-row { align-items: center; border-bottom: 1px dashed #e4e9e6; display: flex; gap: 10px; justify-content: space-between; padding: 8px 0; }
+    .domain-risk-row:last-child { border-bottom: 0; }
+    .domain-risk-meta { align-items: center; display: flex; flex-shrink: 0; gap: 6px; }
+    .domain-risk-meta span { color: #839089; font-size: 10px; }
+
+    /* rows */
+    .rows { padding: 0; }
+    .row { align-items: center; border-bottom: 1px solid #e5ebe6; display: grid; gap: 10px; grid-template-columns: minmax(0,1fr) auto; padding: 12px 0; }
+    .row:last-child { border-bottom: 0; }
+    .notion-link { color: #193b32; font-size: 12px; font-weight: 600; text-decoration: none; }
+    .notion-link span { color: #a56624; margin-left: 5px; }
+    .notion-link:hover { color: #a56624; text-decoration: underline; text-underline-offset: 3px; }
+    .row p { color: #7b8882; font-size: 10px; margin: 4px 0 0; }
+
+    /* badges */
+    .badge { border-left: 3px solid currentColor; display: inline-block; font-size: 9px; font-weight: 600; letter-spacing: .05em; padding: 4px 7px; text-transform: uppercase; white-space: nowrap; }
+    .badge.good { background: #e7f2eb; color: #3e7e56; }
+    .badge.critical { background: #fae9e5; color: #ac483d; }
+    .badge.attention { background: #fbf0db; color: #a36c24; }
+
+    /* filter + search */
+    .search-filter-row { align-items: flex-start; display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+    .search-box-wrap { flex-shrink: 0; }
+    .search-box { background: #fffdf8; border: 1px solid #ced8d2; color: #19332d; font-size: 11px; padding: 6px 10px; width: 220px; outline: none; }
+    .search-box:focus { border-color: #31594f; }
+    .filter-bar { border-bottom: 1px solid #d7dfd9; display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 18px; padding-bottom: 13px; }
+    .filter-bar button { background: transparent; border: 1px solid #ced8d2; color: #60726b; font-size: 10px; font-weight: 600; padding: 6px 10px; }
+    .filter-bar button.selected, .filter-bar button:hover { background: #31594f; border-color: #31594f; color: #fff; }
+
+    /* state band */
+    .state-band { background: #fffdf8; border-top: 3px solid #31594f; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); margin-bottom: 20px; padding: 3px 0; }
+    .state-band div { border-left: 1px solid #dde5df; padding: 14px 20px; }
+    .state-band div:first-child { border-left: 0; }
+    .state-band strong { color: #1d3e35; display: block; font-size: 25px; letter-spacing: -.06em; }
+    .state-band span { color: #7c8983; display: block; font-size: 10px; margin-top: 5px; }
+
+    /* tables + pagination */
+    .table-scroll { border: 1px solid #e4e9e6; overflow-x: auto; }
+    .table-scroll::-webkit-scrollbar { height: 6px; }
+    .table-scroll::-webkit-scrollbar-track { background: #f0f4f0; }
+    .table-scroll::-webkit-scrollbar-thumb { background: #b0c0b8; border-radius: 3px; }
+    .data-table { min-width: 810px; }
+    .table-head, .table-row { display: grid; gap: 10px; grid-template-columns: var(--table-columns, minmax(220px, 2fr) repeat(6, minmax(110px, 1fr))); padding: 9px 8px; }
+    .table-head { background: #f0f4f0; color: #587168; font-size: 9px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+    .table-row { align-items: center; border-bottom: 1px solid #e4e9e6; color: #5e7068; font-size: 11px; min-height: 48px; }
+    .table-row:hover { background: #f4f8f4; }
+    .table-pagination { align-items: center; color: #6f7f78; display: flex; font-size: 10px; justify-content: space-between; gap: 12px; padding: 10px 2px 0; }
+    .page-controls { display: flex; gap: 4px; max-width: 60%; overflow-x: auto; padding-bottom: 2px; }
+    .page-controls button { background: #fffdf8; border: 1px solid #ced8d2; color: #486058; flex: 0 0 auto; font-size: 10px; line-height: 1; min-width: 27px; padding: 6px 8px; }
+    .page-controls button:hover:not(:disabled), .page-controls button.current { background: #31594f; border-color: #31594f; color: #fff; }
+    .page-controls button:disabled { cursor: not-allowed; opacity: .4; }
+
+    /* MY ACTIONS */
+    .actions-header { align-items: center; display: flex; gap: 12px; margin-bottom: 12px; justify-content: space-between; flex-wrap: wrap; }
+    .view-toggle { display: flex; gap: 0; border: 1px solid #ced8d2; overflow: hidden; }
+    .view-toggle button { background: transparent; border: 0; border-right: 1px solid #ced8d2; color: #60726b; font-size: 10px; font-weight: 600; padding: 6px 11px; }
+    .view-toggle button:last-child { border-right: 0; }
+    .view-toggle button.selected { background: #31594f; color: #fff; }
+    .done-card { align-items: center; background: #e7f2eb; border-left: 4px solid #3e7e56; display: flex; gap: 12px; margin-bottom: 14px; padding: 10px 14px; }
+    .done-card strong { color: #1d3e35; font-size: 22px; letter-spacing: -.04em; }
+    .done-card span { color: #3e7e56; font-size: 11px; font-weight: 600; flex: 1; }
+    .done-link { color: #a56624; font-size: 10px; font-weight: 600; text-decoration: none; }
+    .done-link:hover { text-decoration: underline; }
+    .action-group { margin-bottom: 16px; }
+    .action-group-title { align-items: center; border-bottom: 1px solid #d7dfd9; color: #486058; display: flex; font-size: 10px; font-weight: 600; gap: 8px; letter-spacing: .09em; margin-bottom: 4px; padding-bottom: 8px; text-transform: uppercase; }
+    .action-group-title.critical { color: #ac483d; }
+    .action-group-title.attention { color: #a36c24; }
+    .action-group-title.good { color: #3e7e56; }
+    .count-badge { background: #e4eae6; border-radius: 10px; color: #486058; font-size: 9px; padding: 2px 7px; }
+    .action-row { align-items: flex-start; border-bottom: 1px solid #e5ebe6; display: flex; gap: 10px; padding: 10px 6px; }
+    .action-row:hover { background: #f4f8f4; }
+    .action-row.action-done { opacity: .5; }
+    .action-check { align-items: center; background: #fff; border: 1.5px solid #ced8d2; border-radius: 3px; color: #3e7e56; cursor: pointer; display: flex; flex-shrink: 0; font-size: 11px; font-weight: 700; height: 16px; justify-content: center; margin-top: 2px; width: 16px; }
+    .action-check.checked { background: #31594f; border-color: #31594f; color: #fff; }
+    .action-check.loading { background: #f0f4f0; color: #839089; }
+    .action-info { flex: 1; min-width: 0; }
+    .action-info p { color: #7b8882; font-size: 10px; margin: 4px 0 0; }
+
+    /* calendar */
+    .cal-wrap { }
+    .cal-hdr { align-items: center; display: flex; gap: 12px; justify-content: space-between; margin-bottom: 8px; padding-bottom: 10px; border-bottom: 1px solid #d7dfd9; }
+    .cal-hdr strong { font-size: 13px; }
+    .cal-nav { background: #fff; border: 1px solid #d1dad4; color: #31594f; font-size: 11px; font-weight: 600; padding: 5px 12px; }
+    .cal-legend { display: flex; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+    .cal-leg-item { align-items: center; display: flex; font-size: 10px; color: #7b8882; gap: 5px; }
+    .cal-leg-dot { border-radius: 2px; height: 10px; width: 14px; display: inline-block; }
+    .cal-grid { display: grid; gap: 2px; grid-template-columns: repeat(7,1fr); }
+    .cal-dh { color: #839089; font-size: 9px; font-weight: 600; letter-spacing: .08em; padding: 5px 4px; text-align: center; text-transform: uppercase; }
+    .cal-day { background: #fffdf8; border: 1px solid #e4e9e6; min-height: 72px; overflow: hidden; padding: 5px 5px 3px; }
+    .cal-day.blank { background: transparent; border-color: transparent; }
+    .cal-day.today { border-color: #31594f; border-width: 2px; }
+    .cal-day.has-urgent { background: #fdf4f2; border-color: #dab0aa; }
+    .cal-dn { color: #486058; font-size: 11px; font-weight: 600; margin-bottom: 3px; }
+    .cal-day.today .cal-dn { color: #31594f; }
+    .cal-ev { border-radius: 0; display: block; font-size: 9px; font-weight: 600; margin-bottom: 2px; overflow: hidden; padding: 2px 5px; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
+    .ce-r { background: #fae9e5; color: #ac483d; }
+    .ce-a { background: #fbf0db; color: #a36c24; }
+    .ce-g { background: #e7f2eb; color: #3e7e56; }
+    .ce-b { background: #e3edf5; color: #3a6480; }
+    .cal-more { color: #839089; font-size: 9px; padding: 1px 4px; }
+
+    /* workflows two-col */
+    .workflow-panel { min-height: 0; padding-bottom: 12px; }
+    .workflow-groups { align-items: start; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 20px; }
+    .wf-group-col { align-self: start; min-width: 0; }
+    .wf-group-label { color: #839089; font-size: 9px; font-weight: 600; letter-spacing: .09em; margin: 12px 0 6px; text-transform: uppercase; }
+    .wf-item { border-bottom: 1px solid #e4e9e6; }
+    .wf-item:last-child { border-bottom: 0; }
+    .wf-row { align-items: center; background: transparent; border: 0; display: flex; gap: 10px; padding: 9px 4px; text-align: left; width: 100%; }
+    .wf-row:hover { background: #f4f8f4; }
+    .wf-num { color: #839089; font-size: 10px; flex-shrink: 0; width: 36px; }
+    .wf-name { color: #19332d; flex: 1; font-size: 12px; font-weight: 600; min-width: 0; }
+    .wf-cadence { border: 1px solid #ced8d2; color: #60726b; font-size: 9px; font-weight: 600; letter-spacing: .05em; padding: 2px 7px; text-transform: uppercase; flex-shrink: 0; }
+    .cadence-live-now { background: #fbf0db; border-color: #e7c87a; color: #a36c24; }
+    .cadence-monthly, .cadence-quarterly, .cadence-annual { background: #e7f2eb; border-color: #a8d6b5; color: #3e7e56; }
+    .wf-chev { color: #839089; flex-shrink: 0; font-size: 13px; transition: transform .2s; }
+    .wf-chev.open { transform: rotate(180deg); }
+    .wf-detail { background: #f4f8f4; border-top: 1px solid #e4e9e6; padding: 10px 10px 10px 50px; }
+    .wf-detail-grid { display: flex; gap: 16px; flex-wrap: wrap; }
+    .wf-detail-grid > div { flex: 1; min-width: 100px; }
+    .wfd-lbl { color: #839089; font-size: 9px; font-weight: 600; letter-spacing: .08em; margin-bottom: 3px; text-transform: uppercase; }
+    .wfd-val { color: #19332d; font-size: 11px; }
+    /* IT tools retired section */
+    .retired-section { border-top: 1px solid #e4e9e6; margin-top: 12px; padding-top: 4px; }
+    .retired-toggle { align-items: center; background: transparent; border: 0; color: #839089; display: flex; font-size: 10px; font-weight: 600; gap: 8px; justify-content: space-between; letter-spacing: .06em; padding: 8px 0; text-transform: uppercase; width: 100%; }
+    .retired-toggle:hover { color: #486058; }
+
+    /* misc */
+    .notice { background: #fffdf8; border-left: 4px solid #c55b45; color: #8e3f35; margin-bottom: 20px; padding: 15px; }
+    .loading { color: #60726b; font-size: 12px; padding: 22px 0; }
+    .empty { color: #8a9690; font-size: 11px; padding: 24px 4px; text-align: center; }
+    footer.site-footer { border-top: 1px solid #d8dfd9; color: #8a9690; font-size: 10px; letter-spacing: .1em; margin: 0 4rem; padding: 18px 0 24px; text-transform: uppercase; }
+
+    /* responsive */
+    @media (max-width: 900px) {
+      .site-header { padding: 0 24px; }
+      .tab-nav { padding: 0 18px; }
+      .content { padding: 26px 24px 42px; }
+      .metric-band { grid-template-columns: repeat(3,1fr); }
+      .metric-band button:nth-child(4) { border-left: 0; }
+      .two-columns { grid-template-columns: 1fr; }
+      .workflow-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      footer.site-footer { margin: 0 24px; }
+    }
+    @media (max-width: 560px) {
+      .site-header { align-items: flex-start; flex-direction: column; gap: 10px; padding: 14px 16px; }
+      .header-actions { justify-content: space-between; width: 100%; }
+      .tab-nav { padding: 0 9px; }
+      .tab-nav button { font-size: 9px; padding: 10px 7px 8px; }
+      .content { padding: 22px 16px 34px; }
+      .metric-band, .state-band { grid-template-columns: 1fr; }
+      .metric-band button, .state-band div { border-left: 0; border-top: 1px solid rgba(255,255,255,.14); }
+      .metric-band button:first-child, .state-band div:first-child { border-top: 0; }
+      .state-band div { border-top-color: #dde5df; }
+      .panel { padding: 0 14px 14px; }
+      .panel-heading span { display: none; }
+      .workflow-groups { grid-template-columns: 1fr; }
+      footer.site-footer { margin: 0 16px; }
+    }
+  `}</style>
+}
+
+/* ══════════════════════════════════════════════════════════
+   ROOT
+   ════════════════════════════════════════════════════════ */
+export default function Dashboard() {
+  const [tab,    setTab]    = useState('overview')
+  const [filter, setFilter] = useState('all')
+  const [person, setPerson] = useState('')
+  const [data,   setData]   = useState({})
+  const [error,  setError]  = useState('')
+  const [loading,setLoading]= useState(true)
+  const [synced, setSynced] = useState(null)
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    const keys = ['risks','controls','tracker','documents','ropa','tools']
+    const results = await Promise.allSettled(keys.map(get))
+    const next = Object.fromEntries(results.map((r,i) => [
+      keys[i], r.status==='fulfilled' ? r.value : { total:0, items:[], byStatus:{}, byDomain:{}, byFlag:{} }
+    ]))
+    if (results.slice(0,4).every(r => r.status==='rejected')) setError('Could not load Notion data')
+    setData(next); setSynced(new Date()); setLoading(false)
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  // Deduplicated person list — no duplicates from "Dr Kate McAlpine" vs "Kate McAlpine"
+  const personOptions = useMemo(() => {
+    const raw = Object.values(data).flatMap(e => e?.items||[]).flatMap(i => i.owner?.split(',').map(n=>n.trim())||[]).filter(Boolean)
+    return dedupeNames(raw)
+  }, [data])
+
+  const scoped = useMemo(() => {
+    // Match person filter against normalised name to handle Dr/no-Dr variants
+    const only = person
+      ? item => {
+          const names = (item.owner||'').split(',').map(n=>n.trim())
+          return names.some(n => normaliseName(n) === normaliseName(person))
+        }
+      : () => true
+    const ri = (data.risks?.items||[]).filter(only)
+    const ci = (data.controls?.items||[]).filter(only)
+    const ti = (data.tracker?.items||[]).filter(only)
+    const di = (data.documents?.items||[]).filter(only)
+    const pi = (data.ropa?.items||[]).filter(only)
+    const oi = (data.tools?.items||[]).filter(only)
+    const pending = ti.filter(i=>i.dueDate&&!['Done','Skipped'].includes(i.status)).sort((a,b)=>a.dueDate.localeCompare(b.dueDate))
+    return {
+      risks: { ...data.risks, total:ri.length, items:ri, byProbability:count(ri,'probability',['High','Medium','Low']), byCategory:count(ri,'category',['Open','Addressed','Closed']), byDomain:Object.fromEntries(Object.entries(data.risks?.byDomain||{}).map(([d])=>[d,ri.filter(i=>i.domain===d).length])) },
+      controls: { ...data.controls, total:ci.length, items:ci, byStatus:count(ci,'status',['Active','Partial','Planned','Not In Place']) },
+      tracker: { ...data.tracker, total:ti.length, items:ti, byStatus:count(ti,'status',['Done','In Progress','To Do','Overdue','Skipped']), upcoming:pending.slice(0,5) },
+      documents: { ...data.documents, total:di.length, items:di, byStatus:Object.fromEntries(Object.keys(data.documents?.byStatus||{}).map(s=>[s,di.filter(i=>i.status===s).length])) },
+      ropa: { ...data.ropa, total:pi.length, items:pi, byFlag:pi.reduce((r,i)=>i.flag?{...r,[i.flag]:(r[i.flag]||0)+1}:r,{}) },
+      tools: { ...data.tools, total:oi.length, items:oi },
+    }
+  }, [data, person])
+
+  const tabs = [
+    ['overview','Overview'],
+    ['actions','My Actions'],
+    ['risks','Risk Register'],
+    ['controls','Controls'],
+    ['safeguarding','Safeguarding'],
+    ['documents','Document Library'],
+    ['ropa','RoPA'],
+    ['tools','IT Tools'],
+  ]
+
+  const open = (nextTab, nextFilter='all') => { setTab(nextTab); setFilter(nextFilter) }
+
+  const view =
+    tab==='overview'     ? <Overview {...scoped} onOpen={open} />
+    : tab==='actions'    ? <MyActions tracker={scoped.tracker} filter={filter} onFilter={setFilter} />
+    : tab==='risks'      ? <RiskRegister risks={scoped.risks} filter={filter} onFilter={setFilter} />
+    : tab==='controls'   ? <Controls controls={scoped.controls} filter={filter} onFilter={setFilter} />
+    : tab==='safeguarding'?<Safeguarding tracker={scoped.tracker} risks={scoped.risks} controls={scoped.controls} />
+    : tab==='documents'  ? <DocumentLibrary documents={scoped.documents} filter={filter} onFilter={setFilter} />
+    : tab==='ropa'       ? <RoPA ropa={scoped.ropa} filter={filter} onFilter={setFilter} />
+    : <ITTools tools={scoped.tools} filter={filter} onFilter={setFilter} />
+
+  return (
+    <>
+      <DashboardStyles />
+      <main className="hub">
+        <header className="site-header">
+          <div className="brand"><h1>CONNECT<span>GO</span></h1><p>Governance &amp; Compliance</p></div>
+          <div className="header-actions">
+            {synced && <small>Last sync · {synced.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</small>}
+            <select value={person} onChange={e=>setPerson(e.target.value)} aria-label="Filter by person">
+              <option value="">All people</option>
+              {personOptions.map(name=><option key={name} value={name}>{name}</option>)}
+            </select>
+            <a className="sign-out" href="/.netlify/functions/auth?action=logout">Sign out</a>
+          </div>
+        </header>
+        <nav className="tab-nav" aria-label="Governance dashboard navigation">
+          {tabs.map(([id,label])=>(
+            <button key={id} className={tab===id?'active':''} onClick={()=>open(id)}>{label}</button>
+          ))}
+        </nav>
+        <div className="content">
+          <div className="eyebrow">{tabs.find(([id])=>id===tab)[1]} — ConnectGo Limited</div>
+          {error    ? <div className="notice">Could not load Notion data: {error}</div>
+           : loading ? <div className="loading">Loading governance data from Notion…</div>
+           : view}
+        </div>
+        <footer className="site-footer">ConnectGo Ltd · Confidential</footer>
+      </main>
+    </>
   )
 }
