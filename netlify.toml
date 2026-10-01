@@ -2,6 +2,9 @@
   command = "npm run build"
   publish = "dist"
 
+[functions."risk-snapshot"]
+  schedule = "55 23 * * *"
+
 [dev]
   command = "vite"
   port = 8888
