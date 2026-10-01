@@ -1,6 +1,44 @@
-const { requireUser, unauthorized } = require('./auth')
-
 const TOKEN = process.env.NOTION_TOKEN
+const { requireUser, unauthorized } = require('./auth')
+// Daily history storage is kept here to avoid an additional helper file.
+const { recordSnapshot, readHistory } = (() => {
+const { MongoClient } = require('mongodb')
+let connection
+async function collection() {
+  if (!connection) {
+    if (!process.env.MONGODB_URI) throw new Error('History storage is not configured')
+    const client = new MongoClient(process.env.MONGODB_URI, { maxPoolSize: 2, serverSelectionTimeoutMS: 5000 })
+    connection = client.connect().catch(error => { connection = undefined; throw error })
+  }
+  const client = await connection
+  return client.db(process.env.MONGODB_DB || 'connectgo').collection('risk_daily_snapshots')
+}
+function snapshot(items, now = new Date()) {
+  return {
+    _id: `${process.env.DASHBOARD_ID || 'governance'}:v2:${now.toISOString().slice(0, 10)}`,
+    dashboard: process.env.DASHBOARD_ID || 'governance',
+    day: now.toISOString().slice(0, 10),
+    capturedAt: now.toISOString(),
+    version: 2,
+    items: items.filter(r => r.category !== 'Closed').map(r => ({
+      id: r.id, domain: r.domain || 'Unassigned', owner: r.owner || '',
+      score: r.riskScore != null && String(r.riskScore).trim() !== '' && Number.isFinite(Number(r.riskScore)) && Number(r.riskScore) >= 0 ? Number(r.riskScore) : null,
+      severityScore: r.severityScore ?? null, riskRating: r.riskRating || '', scoreDate: r.scoreDate || null,
+    })),
+  }
+}
+async function recordSnapshot(items) {
+  const store = await collection()
+  const value = snapshot(items)
+  await store.updateOne({ _id: value._id }, { $set: value }, { upsert: true })
+}
+async function readHistory() {
+  const store = await collection()
+  return store.find({ dashboard: process.env.DASHBOARD_ID || 'governance', version: 2 }, { projection: { _id: 0, dashboard: 0 } }).sort({ day: -1 }).limit(365).toArray().then(rows => rows.reverse())
+}
+return { recordSnapshot, readHistory }
+
+})();
 
 const DS = {
   risks: '32cc7c4e-dba0-4b15-a963-9fabbb9ee4f5',
@@ -53,6 +91,12 @@ const date = (page, name) => prop(page, name)?.date?.start ?? null
 const plain = values => values?.map(value => value.plain_text).join('') ?? ''
 const text = (page, name) => plain(prop(page, name)?.rich_text)
 const number = (page, name) => prop(page, name)?.number ?? null
+const identifier = (page, name) => {
+  const value = prop(page, name)
+  const unique = value?.unique_id
+  if (unique?.number != null) return unique.prefix ? `${unique.prefix}-${unique.number}` : String(unique.number)
+  return value?.number ?? plain(value?.rich_text)
+}
 const url = (page, name) => prop(page, name)?.url ?? null
 const people = (page, name) => {
   const value = prop(page, name)
@@ -81,7 +125,22 @@ const propertyText = value => {
   if (value.type === 'formula') return value.formula?.string ?? value.formula?.number ?? ''
   return ''
 }
+const propertyNumber = value => {
+  if (!value) return null
+  if (value.type === 'number') return value.number
+  if (value.type === 'formula') {
+    const raw = value.formula?.number ?? value.formula?.string
+    if (raw == null || String(raw).trim() === '') return null
+    const formulaValue = Number(raw)
+    return Number.isFinite(formulaValue) ? formulaValue : null
+  }
+  const raw = propertyText(value)
+  if (raw == null || String(raw).trim() === '') return null
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) ? parsed : null
+}
 const namedText = (page, names) => propertyText(propertyByNames(page, names))
+const namedNumber = (page, names) => propertyNumber(propertyByNames(page, names))
 const namedDate = (page, names) => propertyByNames(page, names)?.date?.start ?? ''
 const title = page => {
   const activity = plain(prop(page, 'Activity')?.title)
@@ -95,7 +154,7 @@ function aggregateRisks(pages) {
   const byProbability = { High: 0, Medium: 0, Low: 0 }
   const byDomain = { 'Data Protection': 0, Safeguarding: 0, Commercial: 0, Operational: 0, Regulatory: 0, Reputational: 0 }
   const byControlStatus = { 'In Place': 0, Partial: 0, 'Not In Place': 0, 'Not Applicable': 0 }
-  const byCategory = { Open: 0, Addressed: 0, Closed: 0 }
+  const byCategory = { Open: 0, Addressed: 0, Ongoing: 0, Closed: 0 }
   for (const page of pages) {
     const probability = sel(page, 'Probability'); if (probability && probability in byProbability) byProbability[probability]++
     const domain = sel(page, 'Domain'); if (domain && domain in byDomain) byDomain[domain]++
@@ -110,6 +169,7 @@ function aggregateRisks(pages) {
     domain: propertyNameByNames(sample, ['Domain'], 'Domain'),
     probability: propertyNameByNames(sample, ['Probability'], 'Probability'),
     consequences: propertyNameByNames(sample, ['Consequences'], 'Consequences'),
+    riskScore: propertyNameByNames(sample, ['Risk Score'], 'Risk Score'),
     controlStatus: propertyNameByNames(sample, ['Control Status'], 'Control Status'),
     category: propertyNameByNames(sample, ['Risk Category'], 'Risk Category'),
     reviewDate: propertyNameByNames(sample, ['Review Date'], 'Review Date'),
@@ -117,13 +177,13 @@ function aggregateRisks(pages) {
   }
   return {
     total: pages.length, byProbability, byDomain, byControlStatus, byCategory, columns,
-    items: pages.map(page => ({ ...link(page), riskId: number(page, 'Risk ID'), domain: sel(page, 'Domain'), probability: sel(page, 'Probability'), owner: people(page, 'Risk Owner'), consequences: sel(page, 'Consequences'), category: sel(page, 'Risk Category'), controlStatus: sel(page, 'Control Status'), reviewDate: date(page, 'Review Date'), reviewFrequency: sel(page, 'Review Frequency') })),
+    items: pages.map(page => ({ ...link(page), riskId: identifier(page, 'Risk ID'), domain: sel(page, 'Domain'), probability: sel(page, 'Probability'), owner: people(page, 'Risk Owner'), consequences: sel(page, 'Consequences'), riskScore: namedNumber(page, ['Risk Score']), severityScore: namedNumber(page, ['Severity Score']), riskRating: namedText(page, ['Risk Rating']), likelihood: namedText(page, ['Likelihood']), scoreDate: date(page, 'Score Date'), dpcScore: namedNumber(page, ['DPC Score']), eoi: namedText(page, ['EOI']), cobScore: namedNumber(page, ['COB Score']), category: sel(page, 'Risk Category'), controlStatus: sel(page, 'Control Status'), reviewDate: date(page, 'Review Date'), reviewFrequency: sel(page, 'Review Frequency') })),
   }
 }
 
 function aggregateControls(pages) {
   const byStatus = { Active: 0, Partial: 0, Planned: 0, 'Not In Place': 0 }
-  const byDomain = { 'Data Protection': 0, Safeguarding: 0, Commercial: 0 }
+  const byDomain = { 'Data Protection': 0, Safeguarding: 0, Commercial: 0, Operational: 0, Regulatory: 0, Reputational: 0 }
   for (const page of pages) {
     const status = sel(page, 'Status'); if (status && status in byStatus) byStatus[status]++
     const domain = sel(page, 'Domain'); if (domain && domain in byDomain) byDomain[domain]++
@@ -139,7 +199,7 @@ function aggregateControls(pages) {
     reviewDate: propertyNameByNames(sample, ['Review Date'], 'Review Date'),
     reviewFrequency: propertyNameByNames(sample, ['Review Frequency'], 'Review Frequency'),
   }
-  return { total: pages.length, byStatus, byDomain, columns, items: pages.map(page => ({ ...link(page), controlId: number(page, 'Control ID'), domain: sel(page, 'Domain'), type: sel(page, 'Control Type'), status: sel(page, 'Status'), owner: text(page, 'Owner'), reviewDate: date(page, 'Review Date'), reviewFrequency: sel(page, 'Review Frequency') })) }
+  return { total: pages.length, byStatus, byDomain, columns, items: pages.map(page => ({ ...link(page), controlId: identifier(page, 'Control ID'), domain: sel(page, 'Domain'), type: sel(page, 'Control Type'), status: sel(page, 'Status'), owner: text(page, 'Owner'), reviewDate: date(page, 'Review Date'), reviewFrequency: sel(page, 'Review Frequency') })) }
 }
 
 function aggregateDocuments(pages) {
@@ -233,13 +293,11 @@ function aggregateTools(pages) {
 }
 
 exports.handler = async event => {
-  // Second line of defence behind the edge gate: no valid session, no data.
-  if (!(await requireUser(event))) return unauthorized()
+  if (!requireUser(event)) return unauthorized()
   if (!TOKEN) return { statusCode: 500, body: JSON.stringify({ error: 'NOTION_TOKEN is not configured' }) }
 
   // Task checkbox write-back: POST /.netlify/functions/notion?action=patch&pageId=<id>
   if (event.queryStringParameters?.action === 'patch') {
-    if (event.httpMethod !== 'POST') return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) }
     const pageId = event.queryStringParameters?.pageId
     if (!pageId) return { statusCode: 400, body: JSON.stringify({ error: 'Missing pageId' }) }
     try {
@@ -261,6 +319,23 @@ exports.handler = async event => {
   try {
     const pages = await queryAll(DS[db])
     const body = db === 'risks' ? aggregateRisks(pages) : db === 'controls' ? aggregateControls(pages) : db === 'tracker' ? aggregateTracker(pages) : db === 'documents' ? aggregateDocuments(pages) : db === 'ropa' ? aggregateRopa(pages) : aggregateTools(pages)
+    if (db === 'risks') {
+      try {
+        await recordSnapshot(body.items)
+        body.history = await readHistory()
+      } catch {
+        body.historyError = 'Risk history could not be updated. Current risk data is still available.'
+        try { body.history = await readHistory() } catch { body.history = [] }
+      }
+    }
     return { statusCode: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }, body: JSON.stringify(body) }
   } catch (error) { return { statusCode: 500, body: JSON.stringify({ error: error.message }) } }
 }
+
+// Used by the scheduled function; history is only recorded after a complete Notion query.
+exports.captureRiskHistory = async () => {
+  if (!TOKEN) throw new Error('NOTION_TOKEN is not configured')
+  const data = aggregateRisks(await queryAll(DS.risks))
+  await recordSnapshot(data.items)
+}
+
