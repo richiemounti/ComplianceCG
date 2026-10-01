@@ -1,7 +1,241 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+// Monitoring rules and chart calculations.
+const {localDay, overdue, score: riskScore, rating, isHigh, monitor} = (() => {
+const localDay = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+const score = risk => {
+  if (risk.riskScore == null || String(risk.riskScore).trim() === '') return null
+  const stored = Number(risk.riskScore)
+  return Number.isFinite(stored) && stored >= 0 ? stored : null
+}
+const rating = risk => String(risk.riskRating || '').toLowerCase().replace(/^[^a-z]+/, '').trim()
+const isHigh = risk => ['high', 'very high', 'critical'].includes(rating(risk))
+const overdue = (date, today) => Boolean(date && date.slice(0, 10) < today)
+function monitor(risks, controls, tasks, today = localDay()) {
+  const active = risks.filter(r => r.category !== 'Closed')
+  const high = active.filter(isHigh)
+  const reviews = active.filter(r => overdue(r.reviewDate, today))
+  const gaps = controls.filter(c => c.status !== 'Active')
+  const late = tasks.filter(t => !['Done', 'Skipped'].includes(t.status) && (t.status === 'Overdue' || overdue(t.dueDate, today)))
+  return { active, high, reviews, gaps, late }
+}
+
+return {localDay,overdue,score,rating,isHigh,monitor}
+})();
+const {trendPoints,trendChange} = (() => {
+function trendPoints(history, domain, days, now = new Date()) {
+  const end = now.toISOString().slice(0, 10)
+  const start = new Date(`${end}T00:00:00Z`)
+  start.setUTCDate(start.getUTCDate() - days + 1)
+  const cutoff = start.toISOString().slice(0, 10)
+  return history.filter(row => row.version === 2 && row.day >= cutoff && row.day <= end).sort((a,b) => a.day.localeCompare(b.day)).map(row => {
+    const items = row.items.filter(item => domain === 'all' || item.domain === domain)
+    const scored = items.filter(item => typeof item.score === 'number' && Number.isFinite(item.score) && item.score >= 0)
+    const domains = Object.fromEntries([...new Set(items.map(i => i.domain))].map(domain => {
+      const values = scored.filter(i => i.domain === domain)
+      return [domain, values.length ? values.reduce((sum,i) => sum + i.score, 0) : null]
+    }))
+    return { day: row.day, capturedAt: row.capturedAt, total: items.length && !scored.length ? null : scored.reduce((sum,item) => sum + item.score, 0),
+      count: items.length, unscored: items.length - scored.length, domains }
+  })
+}
+function trendChange(points) {
+  if (points.length < 2) return null
+  const first = points[0].total, last = points.at(-1).total
+  if (first === null || last === null) return null
+  return { absolute: last - first, percent: first ? (last - first) / first * 100 : null }
+}
+
+return {trendPoints,trendChange}
+})();
+const {dateKey,parseDay,weekRange,reviewSources,reviewOccurrences} = (() => {
+const steps = {monthly:1, quarterly:3, annually:12, annual:12, yearly:12}
+const dateKey = date => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`
+function parseDay(value) {
+  const key = String(value || '').slice(0,10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return null
+  const [y,m,d] = key.split('-').map(Number)
+  const result = new Date(y,m-1,d,12)
+  return dateKey(result) === key ? result : null
+}
+function weekRange(now = new Date()) {
+  const start = new Date(now.getFullYear(),now.getMonth(),now.getDate(),12)
+  start.setDate(start.getDate()-(start.getDay()+6)%7)
+  const end = new Date(start); end.setDate(end.getDate()+6)
+  return {start:dateKey(start),end:dateKey(end)}
+}
+function reviewSources(risks, controls) {
+  return [...risks.filter(r=>r.category!=='Closed').map(r=>({...r,kind:'Risk'})), ...controls.map(c=>({...c,kind:'Control'}))]
+}
+// Always calculate from the original anchor so Jan 31 -> Feb 28 -> Mar 31.
+function reviewOccurrences(sources, start, end) {
+  const first=parseDay(start), last=parseDay(end)
+  if (!first || !last || first>last) return []
+  const result=[]
+  for (const item of sources) {
+    const anchor=parseDay(item.reviewDate)
+    if (!anchor || anchor>last) continue
+    const step=steps[String(item.reviewFrequency || '').trim().toLowerCase()]
+    const append=due=>{const key=dateKey(due);if(key>=start&&key<=end)result.push({...item,dueDate:key,occurrenceId:`${item.kind}:${item.id}:${key}`,recurring:Boolean(step)})}
+    if (!step) { append(anchor); continue }
+    const distance=(first.getFullYear()-anchor.getFullYear())*12+first.getMonth()-anchor.getMonth()
+    for (let n=Math.max(0,Math.floor(distance/step));;n++) {
+      const month=new Date(anchor.getFullYear(),anchor.getMonth()+n*step,1,12)
+      const due=new Date(month.getFullYear(),month.getMonth(),Math.min(anchor.getDate(),new Date(month.getFullYear(),month.getMonth()+1,0).getDate()),12)
+      if(due>last)break
+      append(due)
+    }
+  }
+  return result.sort((a,b)=>a.dueDate.localeCompare(b.dueDate)||a.name.localeCompare(b.name))
+}
+
+return {dateKey,parseDay,weekRange,reviewSources,reviewOccurrences}
+})();
+const RiskTrend = (() => {
+
+const colors = ['#31594f', '#ac6545', '#657aaf', '#96783d', '#8b6899', '#5e9095', '#8b8d48']
+const label = day => new Date(`${day}T00:00:00Z`).toLocaleDateString('en-GB', { day:'numeric', month:'short', timeZone:'UTC' })
+const number = value => value == null ? '—' : Number(value.toFixed(2)).toLocaleString('en-GB')
+
+function LineChart({ points, series, title }) {
+  const max = Math.max(1, ...points.flatMap(p => series.map(s => s.value(p))))
+  const first = Date.parse(points[0].day), last = Date.parse(points.at(-1).day)
+  const x = p => 48 + (last === first ? .5 : (Date.parse(p.day) - first) / (last - first)) * 580
+  const y = value => 180 - value / max * 145
+  return <svg viewBox="0 0 660 220" role="img" aria-label={title} className="trend-svg">
+    <title>{title + '. Exact values are available in the snapshot table below.'}</title>
+    {[0, .5, 1].map(ratio => <g key={ratio}><line x1="48" x2="628" y1={y(max * ratio)} y2={y(max * ratio)} stroke="#e4e9e2"/><text x="38" y={y(max * ratio) + 4} textAnchor="end">{number(max * ratio)}</text></g>)}
+    {series.map(s => <g key={s.name}>{points.map((point,i) => {
+      const previous = points[i-1]
+      if (s.value(point) == null) return null
+      // A missing daily snapshot leaves a visible gap rather than an invented value.
+      return <g key={point.day}>{previous && s.value(previous) != null && Date.parse(point.day) - Date.parse(previous.day) === 86400000 && <line x1={x(previous)} y1={y(s.value(previous))} x2={x(point)} y2={y(s.value(point))} stroke={s.color} strokeWidth="2.5"/>}<circle cx={x(point)} cy={y(s.value(point))} r="3.5" fill={s.color}><title>{point.day + ' · ' + s.name + ': ' + number(s.value(point))}</title></circle></g>
+    })}</g>)}
+    <text x="48" y="207">{label(points[0].day)}</text>{points.length > 1 && <text x="628" y="207" textAnchor="end">{label(points.at(-1).day)}</text>}
+  </svg>
+}
+
+function RiskTrend({ history = [], domain, error, stale }) {
+  const [days, setDays] = useState(90)
+  const points = trendPoints(history, domain, days)
+  const change = trendChange(points)
+  const latest = points.at(-1)
+  const domains = [...new Set(points.flatMap(p => Object.keys(p.domains)))].sort()
+  const series = domains.map((name,i) => ({name, color:colors[i % colors.length], value:p => Object.hasOwn(p.domains, name) ? p.domains[name] : 0}))
+  return <section className="monitor-panel trend-panel">
+    <header><div><span className="monitor-kicker">RISK OVER TIME</span><h2>Total risk score</h2></div><div className="watch-tabs trend-range" aria-label="History period">{[30,90,365].map(value => <button key={value} aria-pressed={days === value} className={days === value ? 'selected' : ''} onClick={() => setDays(value)}>{value === 365 ? '1 year' : `${value} days`}</button>)}</div></header>
+    <p className="subtle">Sum of recorded Notion Risk Scores for non-closed risks. No estimated scores are substituted. Person and domain filters apply to each historical snapshot.</p>
+    {points.some(p => p.unscored > 0) && <p className="trend-warning">Some snapshots have missing scores. Their totals include only scored risks; changes in coverage can affect the trend.</p>}
+    {(error || stale) && <p className="trend-warning" role="status">{error || 'Risk source is unavailable. The history below may be stale.'}</p>}
+    {!latest ? <div className="trend-empty"><strong>No recorded history in this period</strong><p>Daily snapshots begin after deployment and a successful Notion sync. Past scores cannot be reconstructed from the current register.</p></div> : <>
+      <div className="trend-summary"><div><strong>{number(latest.total)}</strong><span>Latest recorded total · {label(latest.day)}</span></div><div><strong className={change?.absolute > 0 ? 'danger' : ''}>{change ? `${change.absolute > 0 ? '+' : ''}${number(change.absolute)}` : '—'}</strong><span>{change ? `${change.percent === null ? 'Percentage unavailable from a zero baseline' : `${change.percent > 0 ? '+' : ''}${number(change.percent)}%`} · since ${label(points[0].day)}` : 'Change needs two snapshots with recorded totals'}</span></div><div><strong>{latest.unscored}</strong><span>Unscored risks excluded from total · {latest.count} risks in scope</span></div></div>
+      <div className="trend-charts"><div><h3>Total exposure</h3><LineChart points={points} series={[{name:'Total score', color:colors[0], value:p => p.total}]} title="Total risk score over time"/></div><div><h3>Score by domain</h3><LineChart points={points} series={series} title="Risk score by domain over time"/><div className="trend-legend">{series.map(s => <span key={s.name}><i style={{background:s.color}}/>{s.name}</span>)}</div></div></div>
+      <p className="subtle">{points.length} daily snapshots · dates in UTC · today's point updates with each successful sync. Gaps indicate missing snapshots. Changes can reflect scores, additions, closures, or ownership/domain changes.</p>
+      <details className="trend-details"><summary>View snapshot values</summary><div className="watch-scroll"><table><thead><tr><th>Date (UTC)</th><th>Total score</th><th>Risks</th><th>Unscored</th>{domains.map(d => <th key={d}>{d}</th>)}</tr></thead><tbody>{points.map(p => <tr key={p.day}><td>{p.day}</td><td>{number(p.total)}</td><td>{p.count}</td><td>{p.unscored}</td>{domains.map(d => <td key={d}>{number(Object.hasOwn(p.domains, d) ? p.domains[d] : 0)}</td>)}</tr>)}</tbody></table></div></details>
+    </>}
+  </section>
+}
+
+
+
+return RiskTrend
+})();
+const LiveOverview = (() => {
+const score = riskScore;
+
+const dateLabel = value => value ? new Date(value.slice(0, 10) + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : 'No date set'
+const sourceNames = { risks: 'Risk register', controls: 'Controls', tracker: 'Governance tasks', documents: 'Documents', ropa: 'RoPA', tools: 'IT tools' }
+function LiveOverview({ risks, controls, tracker, health, onOpen }) {
+  const [domain, setDomain] = useState('all')
+  const [queue, setQueue] = useState('risks')
+  const [cell, setCell] = useState(null)
+  const [highOnly, setHighOnly] = useState(false)
+  const inDomain = item => domain === 'all' || (item.domain || 'Unassigned') === domain
+  const m = monitor(risks.items.filter(inDomain), controls.items.filter(inDomain), tracker.items.filter(inDomain))
+  const domains = [...new Set([...risks.items, ...controls.items, ...tracker.items].map(r => r.domain || 'Unassigned'))].sort()
+  const unavailable = ['risks', 'controls', 'tracker'].some(key => !health[key]?.updated)
+  const stale = Object.values(health).some(s => s.error)
+  const watch = [...m.active].filter(r => !highOnly || isHigh(r)).filter(r => !cell || (r.probability === cell.probability && r.consequences === cell.consequence)).sort((a,b) => (score(b) ?? -1) - (score(a) ?? -1))
+  const rows = queue === 'risks' ? watch : queue === 'reviews' ? m.reviews : queue === 'controls' ? m.gaps : m.late
+  const choose = value => { setQueue(value); setCell(null); setHighOnly(false) }
+  const metrics = [
+    ['risks', 'High rated risks', m.high.length, 'Notion High / Very High / Critical · excluding closed', 'danger'],
+    ['controls', 'Control gaps', m.gaps.length, 'Controls not marked active', 'amber'],
+    ['reviews', 'Overdue risk reviews', m.reviews.length, 'Review date before today', 'amber'],
+    ['tasks', 'Overdue actions', m.late.length, 'Open tasks past their deadline', 'danger'],
+  ]
+  return <div className="monitor">
+    <div className="monitor-title"><div><span className="monitor-kicker">GOVERNANCE INTELLIGENCE</span><h1>Risk monitoring</h1><p>Your current exposure. Your next priorities.</p></div><label>Monitor domain<select value={domain} onChange={e => { setDomain(e.target.value); setCell(null) }}><option value="all">All domains</option>{domains.map(d => <option key={d}>{d}</option>)}</select></label></div>
+    <div className={`posture ${unavailable || stale ? 'uncertain' : ''}`}><span className="posture-icon">◉</span><div><strong>{unavailable ? 'Monitoring data incomplete' : stale ? 'Some sources need attention' : m.high.length || m.late.length || m.reviews.length || m.gaps.length ? 'Attention required' : 'No priority signals in recorded data'}</strong><p>{unavailable ? 'Connect the unavailable sources to establish your current risk position.' : `${m.active.length} non-closed risks in scope · ${m.active.filter(r => score(r) === null).length} unscored · ${m.active.filter(r => !r.owner).length} without an owner · ${m.active.filter(r => !r.riskRating).length} without a rating`}</p></div><span className="posture-date">{new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</span></div>
+    <div className="monitor-metrics">{metrics.map(([key,label,value,note,tone]) => <button key={key} onClick={() => { choose(key); setHighOnly(key === 'risks') }} className={queue === key ? 'is-selected' : ''}><span>{label}<span aria-hidden="true">↗</span></span><strong className={tone}>{!health[key === 'controls' ? 'controls' : key === 'tasks' ? 'tracker' : 'risks']?.updated ? '—' : value}</strong><small>{note}</small></button>)}</div>
+    <RiskTrend history={risks.history} domain={domain} error={risks.historyError} stale={health.risks?.error} />
+    <div className="monitor-grid"><section className="monitor-panel"><header><div><span className="monitor-kicker">EXPOSURE</span><h2>Risk landscape</h2></div><span className="subtle">{health.risks?.updated ? m.active.length : '—'} non-closed risks</span></header><p className="subtle">Select a cell to inspect its risks below.</p><div className="live-matrix"><span className="axis">Impact ↓ / Likelihood →</span>{['Low','Medium','High'].map(p => <span className="axis" key={p}>{p}</span>)}{['Major','Moderate','Minor'].flatMap((consequence,i) => [<span className="axis" key={consequence}>{consequence}</span>, ...['Low','Medium','High'].map((probability,j) => {  return <button key={`${consequence}-${probability}`} className={`heat neutral ${cell?.consequence === consequence && cell?.probability === probability ? 'heat-selected' : ''}`} aria-label={`${consequence} impact, ${probability} likelihood`} onClick={() => { setCell({ consequence, probability }); setQueue('risks'); setHighOnly(false) }}><strong>{health.risks?.updated ? m.active.filter(r => r.probability === probability && r.consequences === consequence).length : '—'}</strong><small>risks</small></button> })])}</div><p className="subtle">Matrix shows risk counts by the recorded probability and consequences. Scores and ratings come directly from Notion.</p></section>
+    <section className="monitor-panel"><header><div><span className="monitor-kicker">COVERAGE</span><h2>Exposure by domain</h2></div><button className="text-button" onClick={() => onOpen('risks')}>Open register ↗</button></header><div className="exposure-list">{domains.filter(d => domain === 'all' || d === domain).map(d => { const items = risks.items.filter(r => (r.domain || 'Unassigned') === d && r.category !== 'Closed'); const high = items.filter(r => isHigh(r)).length; return <button key={d} onClick={() => setDomain(d)}><div><span>{d}</span><strong>{items.length}<small> risks</small></strong></div><div className="exposure-track"><i style={{width: `${items.length / Math.max(1, risks.total) * 100}%`}} /></div><small>{high} rated High / Very High / Critical · {items.filter(r => !r.owner).length} unassigned</small></button> })}{!domains.length && <p className="empty">No domain data available.</p>}</div></section></div>
+    <section className="monitor-panel watch-panel"><header><div><span className="monitor-kicker">TAKE ACTION</span><h2>Priority watchlist</h2></div><span className="subtle">{rows.length} records</span></header><div className="watch-tabs">{[['risks','Risk watchlist'],['controls','Control gaps'],['reviews','Overdue reviews'],['tasks','Overdue actions']].map(([key,label]) => <button key={key} className={queue === key ? 'selected' : ''} onClick={() => choose(key)}>{label}</button>)}{highOnly && <button onClick={() => setHighOnly(false)}>High ratings only ×</button>}{cell && <button onClick={() => setCell(null)}>Clear matrix filter ×</button>}</div><div className="watch-scroll"><table><thead><tr><th>{queue === 'controls' ? 'Control' : queue === 'tasks' ? 'Action' : 'Risk'}</th><th>Domain</th><th>Owner</th><th>{queue === 'risks' ? 'Score' : 'Status'}</th><th>{queue === 'tasks' ? 'Due date' : 'Review date'}</th></tr></thead><tbody>{rows.slice(0, 20).map(r => <tr key={r.id}><td><a href={r.url} target="_blank" rel="noreferrer">{r.name} ↗</a></td><td>{r.domain || 'Unassigned'}</td><td>{r.owner || 'Unassigned'}</td><td><span className={`monitor-pill ${queue === 'risks' && isHigh(r) ? 'danger' : ''}`}>{queue === 'risks' ? score(r) ?? 'Unscored' : r.status || r.category || 'Unknown'}</span></td><td>{dateLabel(queue === 'tasks' ? r.dueDate : r.reviewDate)}</td></tr>)}</tbody></table></div>{!rows.length && <p className="empty">{unavailable ? 'Data unavailable for this view. Check source health below.' : 'No matching records in this scope.'}</p>}{rows.length > 20 && <p className="subtle">Showing the first 20 records. <button className="text-button" onClick={() => onOpen(queue === 'tasks' ? 'actions' : queue === 'controls' ? 'controls' : 'risks')}>Open full register ↗</button></p>}</section>
+    <section className="source-health" aria-label="Source health"><div><strong>Source health</strong><span>Notion · refreshes every 60 seconds</span></div>{Object.entries(sourceNames).map(([key,label]) => <div key={key}><span className={`source-dot ${health[key]?.error ? 'failed' : health[key]?.updated ? '' : 'pending'}`} /><span>{label}<small>{health[key]?.error ? health[key]?.updated ? 'Stale · retrying' : 'Unavailable' : health[key]?.updated ? `Synced ${new Date(health[key].updated).toLocaleTimeString('en-GB')}` : 'Waiting'}</small></span></div>)}</section>
+  </div>
+}
+
+
+
+
+
+
+return LiveOverview
+})();
+const {ReviewCalendar,ReviewActions} = (() => {
+
+function useToday() {
+  const [today,setToday]=useState(()=>dateKey(new Date()))
+  useEffect(()=>{const timer=setInterval(()=>setToday(dateKey(new Date())),30000);return()=>clearInterval(timer)},[])
+  return today
+}
+function ReviewList({items,empty}) {
+  return items.length ? <ul className="review-list">{items.map(item=><li key={item.occurrenceId || `${item.kind}:${item.id}`}><div><span className="review-kind">{item.kind}</span> <a href={item.url} target="_blank" rel="noreferrer">Review {item.name} ↗</a><small>{item.owner || 'Unassigned owner'} · {item.reviewFrequency || 'One dated review'}</small></div><time dateTime={item.dueDate || item.reviewDate}>{(item.dueDate || item.reviewDate || '').slice(0,10)}</time></li>)}</ul> : <p className="empty">{empty}</p>
+}
+function ReviewActions({risks,controls,health={}}) {
+  const today=useToday(), range=weekRange(parseDay(today))
+  const sources=reviewSources(risks.items,controls.items)
+  const due=reviewOccurrences(sources,range.start,range.end)
+  const overdue=sources.filter(item=>parseDay(item.reviewDate)&&item.reviewDate.slice(0,10)<range.start)
+  const unscheduled=sources.filter(item=>!parseDay(item.reviewDate))
+  const incomplete=['risks','controls'].some(key=>!health[key]?.updated || health[key]?.error)
+  return <section className="review-panel"><h2>Risk and control reviews due this week</h2><p className="review-note">{range.start} – {range.end} · Monday to Sunday · filtered by the selected person</p>
+    {incomplete&&<p role="status" className="trend-warning">Review sources are unavailable or stale. This schedule may be incomplete.</p>}
+    <ReviewList items={due} empty="No scheduled risk or control reviews this week."/>
+    {!!overdue.length&&<details><summary>{overdue.length} earlier review dates need attention</summary><p className="review-note">These are the dates still recorded in Notion. After completing a review, move its Review Date to the next due date in the register.</p><ReviewList items={overdue} /></details>}
+    {!!unscheduled.length&&<details><summary>{unscheduled.length} reviews have no valid date</summary><ReviewList items={unscheduled}/></details>}
+    <p className="review-note">Open an action to review its record in Notion. Calendar occurrences show planned reviews; they do not prove that a review was completed.</p>
+  </section>
+}
+function ReviewCalendar({risks,controls,health}) {
+  const today=useToday()
+  const [offset,setOffset]=useState(0),[kind,setKind]=useState('All'),[selected,setSelected]=useState(null)
+  const now=parseDay(today), month=new Date(now.getFullYear(),now.getMonth()+offset,1,12)
+  const start=dateKey(month), end=dateKey(new Date(month.getFullYear(),month.getMonth()+1,0,12))
+  const sources=reviewSources(risks.items,controls.items).filter(item=>kind==='All'||item.kind===kind)
+  const events=reviewOccurrences(sources,start,end)
+  const blanks=(month.getDay()+6)%7, days=parseDay(end).getDate()
+  const changeMonth=delta=>{setOffset(value=>value+delta);setSelected(null)}
+  return <div className="review-calendar"><ReviewActions risks={risks} controls={controls} health={health}/>
+    <section className="review-panel"><div className="review-toolbar"><div><h2>Review calendar</h2><p className="review-note">Monthly, quarterly and annual reviews repeat from the recorded Review Date. Dates refresh with Notion every 60 seconds.</p></div><label>Review type <select value={kind} onChange={event=>setKind(event.target.value)}>{['All','Risk','Control'].map(value=><option key={value}>{value}</option>)}</select></label></div>
+      <div className="review-toolbar"><button onClick={()=>changeMonth(-1)}>‹ Previous month</button><h3>{month.toLocaleDateString('en-GB',{month:'long',year:'numeric'})}</h3><button onClick={()=>changeMonth(1)}>Next month ›</button><button onClick={()=>{setOffset(0);setSelected(today)}}>Today</button></div>
+      <div className="review-grid-scroll"><div className="review-grid">{['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(day=><div className="review-day-label" key={day}>{day}</div>)}{Array.from({length:blanks},(_,i)=><div key={'blank'+i}/>)}{Array.from({length:days},(_,i)=>{
+        const key=`${start.slice(0,8)}${String(i+1).padStart(2,'0')}`, matches=events.filter(item=>item.dueDate===key)
+        return <button className={`review-day ${key===today?'today':''} ${key===selected?'selected':''}`} key={key} onClick={()=>setSelected(key)} aria-label={`${key}: ${matches.length} reviews`} aria-pressed={key===selected}><strong>{i+1}</strong>{matches.slice(0,2).map(item=><span key={item.occurrenceId}>{item.kind}: {item.name}</span>)}{matches.length>2&&<small>+{matches.length-2} more — select date</small>}</button>
+      })}</div></div>
+      <h3>{selected?`Reviews on ${selected}`:'All reviews this month'} ({events.filter(item=>!selected||item.dueDate===selected).length})</h3>
+      {selected&&<button onClick={()=>setSelected(null)}>Show all dates</button>}
+      <ReviewList items={events.filter(item=>!selected||item.dueDate===selected)} empty="No reviews scheduled for this selection."/>
+    </section>
+  </div>
+}
+
+return {ReviewCalendar,ReviewActions}
+})();
 
 /* ── API helpers ─────────────────────────────────────────── */
-const get = key => fetch(`/.netlify/functions/notion?db=${key}`).then(async res => {
+const get = key => fetch(`/.netlify/functions/notion?db=${key}`, { cache: 'no-store', signal: AbortSignal.timeout(30000) }).then(async res => {
   const data = await res.json()
   if (!res.ok) throw new Error(data.error || `API error ${res.status}`)
   return data
@@ -11,11 +245,7 @@ const patch = (pageId, status) =>
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ status }),
-  }).then(async res => {
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error || `API error ${res.status}`)
-    return data
-  })
+  }).then(r => r.json())
 
 /* ── Utilities ───────────────────────────────────────────── */
 const formatDate = v =>
@@ -41,6 +271,7 @@ const dedupeNames = names => {
 }
 
 const RECURRING = ['Monthly','Quarterly','Annual','Annually']
+const scoreBand = risk => rating(risk) || 'unrated'
 
 /* ── Shared components ───────────────────────────────────── */
 function Badge({ children }) {
@@ -304,7 +535,7 @@ function Overview({ risks, controls, tracker, onOpen }) {
 /* ══════════════════════════════════════════════════════════
    MY ACTIONS
    ════════════════════════════════════════════════════════ */
-function MyActions({ tracker, filter, onFilter }) {
+function MyActions({ tracker, risks, controls, health, filter, onFilter }) {
   const [view, setView] = useState('list')
   const [localDone, setLocalDone] = useState(new Set())
   const handleDone = id => setLocalDone(prev => new Set([...prev, id]))
@@ -323,6 +554,7 @@ function MyActions({ tracker, filter, onFilter }) {
 
   return (
     <>
+      <ReviewActions risks={risks} controls={controls} health={health} />
       <div className="actions-header">
         <div className="view-toggle">
           {[['list','List'],['cal','Calendar']].map(([v,l]) => (
@@ -412,21 +644,87 @@ function CalendarView({ tracker }) {
 /* ══════════════════════════════════════════════════════════
    RISK REGISTER
    ════════════════════════════════════════════════════════ */
+function RiskProfile({ risks, title, source, onCellSelect, onBandSelect }) {
+  const rows = ['Major', 'Moderate', 'Minor']
+  const columns = ['Low', 'Medium', 'High']
+  const bands = [
+    { key: 'critical', label: 'Critical', range: 'Notion rating', tone: 'critical' },
+    { key: 'very high', label: 'Very High', range: 'Notion rating', tone: 'critical' },
+    { key: 'high', label: 'High', range: 'Notion rating', tone: 'critical' },
+    { key: 'medium', label: 'Medium', range: 'Notion rating', tone: 'attention' },
+    { key: 'low', label: 'Low', range: 'Notion rating', tone: 'good' },
+    { key: 'unrated', label: 'Unrated', range: 'No rating recorded', tone: '' },
+  ]
+  const categoryCount = category => risks.items.filter(r => r.category === category).length
+  const Cell = ({ consequence, probability }) => {
+    const matching = risks.items.filter(r => r.consequences === consequence && r.probability === probability)
+    const className = 'risk-matrix-cell neutral'
+    const content = <><strong>{matching.length}</strong><span>risks</span></>
+    return onCellSelect
+      ? <button type="button" className={className} onClick={() => onCellSelect({ consequence, probability })} aria-label={`${consequence}, ${probability}: ${matching.length} risks`}>{content}</button>
+      : <div className={className}>{content}</div>
+  }
+  return (
+    <Panel title={title} source={source} className="risk-profile-panel">
+      <div className="risk-profile-summary">
+        {bands.map(band => {
+          const value = risks.items.filter(r => scoreBand(r) === band.key).length
+          const content = <><span>{band.label} <small>{band.range}</small></span><strong>{value}</strong></>
+          return onBandSelect
+            ? <button type="button" key={band.key} className={band.tone} onClick={() => onBandSelect(band.key)}>{content}</button>
+            : <div key={band.key} className={band.tone}>{content}</div>
+        })}
+      </div>
+      <div className="risk-profile-body">
+        <div className="risk-matrix-wrap" aria-label="Risk score matrix">
+          <div className="risk-matrix-label">Risk counts by consequence and probability</div>
+          <div className="risk-matrix">
+            <span className="matrix-corner" />
+            {columns.map(column => <span key={column} className="matrix-heading">{column}</span>)}
+            {rows.flatMap(row => [
+              <span key={`${row}-label`} className="matrix-heading matrix-row-heading">{row}</span>,
+              ...columns.map(column => <Cell key={`${row}-${column}`} consequence={row} probability={column} />),
+            ])}
+          </div>
+        </div>
+        <div className="risk-lifecycle" aria-label="Risk lifecycle">
+          <span>Open <strong>{categoryCount('Open')}</strong></span>
+          <span>Addressed <strong>{categoryCount('Addressed')}</strong></span>
+          <span>Ongoing <strong>{categoryCount('Ongoing')}</strong></span>
+          <span>Closed <strong>{categoryCount('Closed')}</strong></span>
+        </div>
+      </div>
+    </Panel>
+  )
+}
+
 function RiskRegister({ risks, filter, onFilter }) {
   const [domainFilter, setDomainFilter] = useState(null)
+  const [profileFilter, setProfileFilter] = useState(null)
   const [search, setSearch] = useState('')
   const rows = risks.items.filter(i => {
     const mDomain = !domainFilter || i.domain === domainFilter
+    const mProfile = !profileFilter || (profileFilter.type === 'cell'
+      ? i.probability === profileFilter.probability && i.consequences === profileFilter.consequence
+      : scoreBand(i) === profileFilter.band)
     const mFilter = filter==='all'||(filter==='high'&&i.probability==='High')||(filter==='open'&&i.category==='Open')
     const mSearch = !search || i.name?.toLowerCase().includes(search.toLowerCase()) || i.domain?.toLowerCase().includes(search.toLowerCase()) || i.owner?.toLowerCase().includes(search.toLowerCase())
-    return mDomain && mFilter && mSearch
+    return mDomain && mProfile && mFilter && mSearch
   })
   return (
     <>
       <div className="search-filter-row">
         <SearchBox value={search} onChange={setSearch} placeholder="Search risks…" />
-        <FilterBar value={filter} onChange={f=>{onFilter(f);setDomainFilter(null)}} options={[['all','All risks'],['high','High probability'],['open','Open risks']]} />
+        <FilterBar value={filter} onChange={f=>{onFilter(f);setDomainFilter(null);setProfileFilter(null)}} options={[['all','All risks'],['high','High probability'],['open','Open risks']]} />
       </div>
+      <RiskProfile
+        risks={risks}
+        title="Current Risk Profile"
+        source="Unified Risk Register"
+        onCellSelect={({ consequence, probability }) => setProfileFilter({ type: 'cell', consequence, probability })}
+        onBandSelect={band => setProfileFilter({ type: 'band', band })}
+      />
+      {profileFilter && <div className="domain-active-label">Showing {profileFilter.type === 'cell' ? `${profileFilter.consequence} / ${profileFilter.probability}` : profileFilter.band}<button type="button" className="domain-clear" onClick={() => setProfileFilter(null)}>× Clear</button></div>}
       <Panel title="Risk Register — By Domain" source="Unified Risk Register">
         <div className="bars">
           {Object.entries(risks.byDomain||{}).filter(([,v])=>v).map(([label,value])=>(
@@ -442,9 +740,9 @@ function RiskRegister({ risks, filter, onFilter }) {
       <Panel title="Risk Register — Records" source={`Unified Risk Register${rows.length!==risks.total?` · ${rows.length} shown`:''}`}>
         <ScrollTable
           items={rows}
-          minWidth={1700}
-          columns="68px minmax(240px,2.1fr) minmax(120px,1fr) minmax(120px,1fr) 100px minmax(140px,1.1fr) minmax(130px,1fr) minmax(130px,1fr) 110px 130px"
-          head={<><span>{risks.columns?.riskId || 'Risk ID'}</span><span>{risks.columns?.title || 'Risk'}</span><span>{risks.columns?.owner || 'Risk Owner'}</span><span>{risks.columns?.domain || 'Domain'}</span><span>{risks.columns?.probability || 'Probability'}</span><span>{risks.columns?.consequences || 'Consequences'}</span><span>{risks.columns?.controlStatus || 'Control Status'}</span><span>{risks.columns?.category || 'Risk Category'}</span><span>{risks.columns?.reviewDate || 'Review Date'}</span><span>{risks.columns?.reviewFrequency || 'Review Frequency'}</span></>}
+          minWidth={2140}
+          columns="68px minmax(240px,2.1fr) minmax(120px,1fr) minmax(120px,1fr) 100px minmax(140px,1.1fr) 95px minmax(130px,1fr) minmax(130px,1fr) 110px 130px 100px 100px 110px"
+          head={<><span>{risks.columns?.riskId || 'Risk ID'}</span><span>{risks.columns?.title || 'Risk'}</span><span>{risks.columns?.owner || 'Risk Owner'}</span><span>{risks.columns?.domain || 'Domain'}</span><span>{risks.columns?.probability || 'Probability'}</span><span>{risks.columns?.consequences || 'Consequences'}</span><span>{risks.columns?.riskScore || 'Risk Score'}</span><span>{risks.columns?.controlStatus || 'Control Status'}</span><span>{risks.columns?.category || 'Risk Category'}</span><span>{risks.columns?.reviewDate || 'Review Date'}</span><span>{risks.columns?.reviewFrequency || 'Review Frequency'}</span><span>Severity Score</span><span>Risk Rating</span><span>Score Date</span></>}
           row={item => (
             <div className="table-row risk-table-row" key={item.id}>
               <span>{item.riskId ?? '—'}</span>
@@ -453,10 +751,11 @@ function RiskRegister({ risks, filter, onFilter }) {
               <span>{item.domain||'—'}</span>
               <Badge>{item.probability}</Badge>
               <span>{item.consequences||'—'}</span>
+              <strong className="score-value">{riskScore(item) ?? '—'}</strong>
               <Badge>{item.controlStatus}</Badge>
               <Badge>{item.category}</Badge>
               <time>{formatDate(item.reviewDate)}</time>
-              <span>{item.reviewFrequency||'—'}</span>
+              <span>{item.reviewFrequency||'—'}</span><span>{item.severityScore ?? '—'}</span><span>{item.riskRating || 'Unrated'}</span><time>{formatDate(item.scoreDate)}</time>
             </div>
           )}
         />
@@ -528,6 +827,7 @@ function Safeguarding({ tracker, risks, controls }) {
         <div><strong>{riskRows.length}</strong><span>Risks</span></div>
         <div><strong>{controlRows.filter(i=>i.status==='Active').length}</strong><span>Controls active</span></div>
       </section>
+      <RiskProfile risks={{ ...risks, total: riskRows.length, items: riskRows }} title="Safeguarding Risk Profile" source="Unified Risk Register" />
       <div className="two-columns">
         <Panel title="Governance Tracker" source="Governance Tracker"><TaskRows items={taskRows} /></Panel>
         <Panel title="Risk Register" source="Unified Risk Register"><TaskRows items={riskRows.map(i=>({...i,activityId:i.riskId,dueDate:i.reviewDate,status:i.controlStatus}))} /></Panel>
@@ -711,8 +1011,6 @@ function DashboardStyles() {
     .header-actions small { color: rgba(255,255,255,.5); font-size: 10px; }
     .header-actions select { background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.24); color: #fff; font-size: 11px; padding: 7px 9px; }
     .header-actions option { color: #19332d; }
-    .header-actions .sign-out { border: 1px solid rgba(255,255,255,.24); color: rgba(255,255,255,.7); font-size: 10px; font-weight: 600; letter-spacing: .09em; padding: 7px 12px; text-decoration: none; text-transform: uppercase; }
-    .header-actions .sign-out:hover { color: #fff; }
 
     /* nav */
     .tab-nav { background: #17332d; display: flex; flex-wrap: wrap; padding: 0 3.25rem; }
@@ -803,6 +1101,39 @@ function DashboardStyles() {
     .state-band div:first-child { border-left: 0; }
     .state-band strong { color: #1d3e35; display: block; font-size: 25px; letter-spacing: -.06em; }
     .state-band span { color: #7c8983; display: block; font-size: 10px; margin-top: 5px; }
+
+    /* live risk profile */
+    .risk-profile-panel { padding-bottom: 18px; }
+    .risk-profile-summary { border-bottom: 1px solid #e0e6e1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 16px; }
+    .risk-profile-summary > div, .risk-profile-summary > button { align-items: center; background: transparent; border: 0; border-left: 1px solid #e0e6e1; display: flex; justify-content: space-between; padding: 11px 14px; text-align: left; }
+    .risk-profile-summary > :first-child { border-left: 0; }
+    .risk-profile-summary > button:hover { background: #f4f8f4; }
+    .risk-profile-summary span { color: #60726b; display: block; font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .risk-profile-summary small { color: #8a9690; font-size: 9px; font-weight: 500; }
+    .risk-profile-summary strong { font-size: 22px; letter-spacing: -.05em; }
+    .risk-profile-summary .critical strong { color: #ac483d; }
+    .risk-profile-summary .attention strong { color: #a36c24; }
+    .risk-profile-summary .good strong { color: #3e7e56; }
+    .risk-profile-body { align-items: end; display: grid; gap: 20px; grid-template-columns: minmax(360px, 1.35fr) minmax(220px, .65fr); }
+    .risk-matrix-label { color: #7c8983; font-size: 9px; font-weight: 600; letter-spacing: .08em; margin-bottom: 7px; text-transform: uppercase; }
+    .risk-matrix { display: grid; gap: 5px; grid-template-columns: 90px repeat(3, minmax(62px, 1fr)); }
+    .matrix-heading { align-items: center; color: #60726b; display: flex; font-size: 9px; font-weight: 600; justify-content: center; letter-spacing: .06em; min-height: 22px; text-transform: uppercase; }
+    .matrix-row-heading { justify-content: flex-start; }
+    .risk-matrix-cell { align-items: center; border: 1px solid transparent; display: flex; flex-direction: column; justify-content: center; min-height: 54px; padding: 5px; }
+    button.risk-matrix-cell { cursor: pointer; }
+    button.risk-matrix-cell:hover { border-color: #31594f; box-shadow: inset 0 0 0 1px #31594f; }
+    .risk-matrix-cell strong { font-size: 17px; letter-spacing: -.04em; }
+    .risk-matrix-cell span { color: currentColor; font-size: 9px; opacity: .7; }
+    .risk-matrix-cell.score-critical { background: #fae9e5; color: #ac483d; }
+    .risk-matrix-cell.score-attention { background: #fbf0db; color: #a36c24; }
+    .risk-matrix-cell.score-good { background: #e7f2eb; color: #3e7e56; }
+    .risk-lifecycle { border-left: 1px solid #e0e6e1; display: grid; gap: 10px; padding: 3px 0 3px 20px; }
+    .risk-lifecycle span { align-items: center; color: #60726b; display: flex; font-size: 11px; justify-content: space-between; }
+    .risk-lifecycle strong { color: #19332d; font-size: 18px; letter-spacing: -.04em; }
+    .score-value { font-size: 13px; text-align: center; }
+    .score-value.score-high { color: #ac483d; }
+    .score-value.score-elevated { color: #a36c24; }
+    .score-value.score-good { color: #3e7e56; }
 
     /* tables + pagination */
     .table-scroll { border: 1px solid #e4e9e6; overflow-x: auto; }
@@ -909,6 +1240,8 @@ function DashboardStyles() {
       .metric-band { grid-template-columns: repeat(3,1fr); }
       .metric-band button:nth-child(4) { border-left: 0; }
       .two-columns { grid-template-columns: 1fr; }
+      .risk-profile-body { grid-template-columns: 1fr; }
+      .risk-lifecycle { border-left: 0; border-top: 1px solid #e0e6e1; grid-template-columns: repeat(3, 1fr); padding: 12px 0 0; }
       .workflow-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       footer.site-footer { margin: 0 24px; }
     }
@@ -922,6 +1255,12 @@ function DashboardStyles() {
       .metric-band button, .state-band div { border-left: 0; border-top: 1px solid rgba(255,255,255,.14); }
       .metric-band button:first-child, .state-band div:first-child { border-top: 0; }
       .state-band div { border-top-color: #dde5df; }
+      .risk-profile-summary { grid-template-columns: 1fr; }
+      .risk-profile-summary > div, .risk-profile-summary > button { border-left: 0; border-top: 1px solid #e0e6e1; }
+      .risk-profile-summary > :first-child { border-top: 0; }
+      .risk-profile-body { gap: 14px; }
+      .risk-matrix { grid-template-columns: 72px repeat(3, minmax(52px, 1fr)); }
+      .risk-lifecycle { grid-template-columns: 1fr; }
       .panel { padding: 0 14px 14px; }
       .panel-heading span { display: none; }
       .workflow-groups { grid-template-columns: 1fr; }
@@ -941,18 +1280,31 @@ export default function Dashboard() {
   const [error,  setError]  = useState('')
   const [loading,setLoading]= useState(true)
   const [synced, setSynced] = useState(null)
+  const [health, setHealth] = useState({})
+  const inFlight = useRef(false)
 
   const load = useCallback(async () => {
-    setLoading(true); setError('')
+    if (inFlight.current) return
+    inFlight.current = true
+    setLoading(true)
     const keys = ['risks','controls','tracker','documents','ropa','tools']
     const results = await Promise.allSettled(keys.map(get))
-    const next = Object.fromEntries(results.map((r,i) => [
-      keys[i], r.status==='fulfilled' ? r.value : { total:0, items:[], byStatus:{}, byDomain:{}, byFlag:{} }
-    ]))
-    if (results.slice(0,4).every(r => r.status==='rejected')) setError('Could not load Notion data')
-    setData(next); setSynced(new Date()); setLoading(false)
+    const now = new Date()
+    setData(previous => Object.fromEntries(keys.map((key, i) => [key, results[i].status === 'fulfilled' ? results[i].value : previous[key]])))
+    setHealth(previous => Object.fromEntries(keys.map((key, i) => [key, results[i].status === 'fulfilled' ? { updated: now.toISOString(), error: false } : { ...previous[key], error: true }])))
+    const failed = keys.filter((_,i) => results[i].status === 'rejected')
+    setError(failed.length ? `Refresh failed: ${failed.join(', ')}. Last available records are retained; unavailable sources have no data.` : '')
+    if (!failed.length) setSynced(now)
+    setLoading(false)
+    inFlight.current = false
   }, [])
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load()
+    const timer = setInterval(() => { if (!document.hidden) load() }, 60000)
+    const resume = () => { if (!document.hidden) load() }
+    document.addEventListener('visibilitychange', resume)
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', resume) }
+  }, [load])
 
   // Deduplicated person list — no duplicates from "Dr Kate McAlpine" vs "Kate McAlpine"
   const personOptions = useMemo(() => {
@@ -970,13 +1322,13 @@ export default function Dashboard() {
       : () => true
     const ri = (data.risks?.items||[]).filter(only)
     const ci = (data.controls?.items||[]).filter(only)
-    const ti = (data.tracker?.items||[]).filter(only)
+    const ti = (data.tracker?.items||[]).filter(only).map(item => !['Done','Skipped'].includes(item.status) && overdue(item.dueDate, localDay()) ? { ...item, status: 'Overdue' } : item)
     const di = (data.documents?.items||[]).filter(only)
     const pi = (data.ropa?.items||[]).filter(only)
     const oi = (data.tools?.items||[]).filter(only)
     const pending = ti.filter(i=>i.dueDate&&!['Done','Skipped'].includes(i.status)).sort((a,b)=>a.dueDate.localeCompare(b.dueDate))
     return {
-      risks: { ...data.risks, total:ri.length, items:ri, byProbability:count(ri,'probability',['High','Medium','Low']), byCategory:count(ri,'category',['Open','Addressed','Closed']), byDomain:Object.fromEntries(Object.entries(data.risks?.byDomain||{}).map(([d])=>[d,ri.filter(i=>i.domain===d).length])) },
+      risks: { ...data.risks, history: (data.risks?.history || []).map(day => ({ ...day, items: day.items.filter(only) })), total:ri.length, items:ri, byProbability:count(ri,'probability',['High','Medium','Low']), byCategory:count(ri,'category',['Open','Addressed','Ongoing','Closed']), byDomain:Object.fromEntries(Object.entries(data.risks?.byDomain||{}).map(([d])=>[d,ri.filter(i=>i.domain===d).length])) },
       controls: { ...data.controls, total:ci.length, items:ci, byStatus:count(ci,'status',['Active','Partial','Planned','Not In Place']) },
       tracker: { ...data.tracker, total:ti.length, items:ti, byStatus:count(ti,'status',['Done','In Progress','To Do','Overdue','Skipped']), upcoming:pending.slice(0,5) },
       documents: { ...data.documents, total:di.length, items:di, byStatus:Object.fromEntries(Object.keys(data.documents?.byStatus||{}).map(s=>[s,di.filter(i=>i.status===s).length])) },
@@ -986,8 +1338,9 @@ export default function Dashboard() {
   }, [data, person])
 
   const tabs = [
-    ['overview','Overview'],
+    ['overview','Live monitoring'],
     ['actions','My Actions'],
+    ['reviews','Review Calendar'],
     ['risks','Risk Register'],
     ['controls','Controls'],
     ['safeguarding','Safeguarding'],
@@ -999,8 +1352,9 @@ export default function Dashboard() {
   const open = (nextTab, nextFilter='all') => { setTab(nextTab); setFilter(nextFilter) }
 
   const view =
-    tab==='overview'     ? <Overview {...scoped} onOpen={open} />
-    : tab==='actions'    ? <MyActions tracker={scoped.tracker} filter={filter} onFilter={setFilter} />
+    tab==='overview'     ? <LiveOverview {...scoped} health={health} onOpen={open} />
+    : tab==='actions'    ? <MyActions tracker={scoped.tracker} risks={scoped.risks} controls={scoped.controls} health={health} filter={filter} onFilter={setFilter} />
+    : tab==='reviews'    ? <ReviewCalendar risks={scoped.risks} controls={scoped.controls} health={health} />
     : tab==='risks'      ? <RiskRegister risks={scoped.risks} filter={filter} onFilter={setFilter} />
     : tab==='controls'   ? <Controls controls={scoped.controls} filter={filter} onFilter={setFilter} />
     : tab==='safeguarding'?<Safeguarding tracker={scoped.tracker} risks={scoped.risks} controls={scoped.controls} />
@@ -1011,17 +1365,18 @@ export default function Dashboard() {
   return (
     <>
       <DashboardStyles />
+      <style>{".monitor { --ink:#193c34; --muted:#73837e; }\n.monitor-title { display:flex; justify-content:space-between; align-items:center; gap:20px; margin-bottom:26px; }\n.monitor-kicker { font-size:10px; letter-spacing:.16em; font-weight:600; color:#75867e; }\n.monitor-title h1 { font-size:36px; letter-spacing:-1.5px; margin:8px 0; font-weight:500; }\n.monitor-title p,.posture p { color:#73837e; font-size:13px; margin:5px 0; }\n.monitor-title label { display:grid; gap:8px; font-size:11px; color:#73837e; }\n.monitor-title select { min-width:180px; padding:10px 12px; border:1px solid #d7dfda; background:#fff; color:#193c34; border-radius:6px; }\n.posture { display:flex; align-items:center; gap:16px; padding:20px 24px; background:#edf2eb; border:1px solid #d7e1d4; border-radius:8px; margin-bottom:20px; }\n.posture.uncertain { background:#fff4e2; border-color:#ebd9b9; }\n.posture-icon { font-size:28px; color:#9b7029; }\n.posture strong { font-size:15px; }.posture-date { margin-left:auto; font-size:11px; color:#64776c; }\n.monitor-metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }\n.monitor-metrics button { border:1px solid #dfe5df; border-radius:8px; background:#fff; text-align:left; padding:20px; color:#193c34; }\n.monitor-metrics button.is-selected { border-color:#638273; box-shadow:0 0 0 1px #638273; }\n.monitor-metrics button>span { display:flex; justify-content:space-between; font-size:12px; }.monitor-metrics strong { display:block; font-size:36px; font-weight:500; margin:16px 0 10px; }.monitor-metrics small { color:#7b877f; font-size:10px; }\n.monitor .danger { color:#af5141; }.monitor .amber { color:#9d722b; }\n.monitor-grid { display:grid; grid-template-columns:1.05fr 1fr; gap:24px; margin-bottom:24px; }\n.monitor-panel { background:#fff; border:1px solid #dfe5df; border-radius:8px; padding:24px; min-width:0; }\n.monitor-panel header { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px; }.monitor-panel h2 { font-size:19px; font-weight:500; margin:6px 0 0; letter-spacing:-.5px; }.subtle { font-size:11px; color:#7b877f; line-height:1.6; }\n.live-matrix { display:grid; grid-template-columns:90px repeat(3,1fr); gap:7px; margin:18px 0; }.axis { font-size:10px; color:#73837e; align-self:center; text-align:center; }.heat { min-height:65px; border:2px solid transparent; border-radius:5px; }.heat strong { display:block; font-size:22px; font-weight:500; }.heat small { font-size:9px; opacity:.7; }.heat-low { background:#e7efe5; color:#496e45; }.heat-medium { background:#f8edcf; color:#9d722b; }.heat-high { background:#f4dcd6; color:#af5141; }.heat-selected,.heat:hover { border-color:#31594f; }.matrix-legend { display:flex; justify-content:flex-end; gap:14px; font-size:10px; color:#73837e; }\n.text-button { border:0; background:none; color:#31594f; font-size:11px; padding:4px; }.exposure-list { max-height:330px; overflow:auto; }.exposure-list button { display:block; width:100%; border:0; border-bottom:1px solid #eef0ec; background:transparent; text-align:left; padding:13px 0; color:#193c34; }.exposure-list button>div:first-child { display:flex; justify-content:space-between; font-size:12px; }.exposure-list small { font-size:10px; color:#7b877f; font-weight:400; }.exposure-track { height:5px; background:#eef1eb; margin:9px 0 5px; border-radius:5px; }.exposure-track i { display:block; height:100%; background:#6d8e77; border-radius:5px; }\n.watch-tabs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:20px; }.watch-tabs button { border:1px solid #e0e5df; background:#fff; border-radius:5px; color:#73837e; padding:8px 12px; font-size:11px; }.watch-tabs button.selected { background:#193c34; color:white; border-color:#193c34; }.watch-scroll { overflow-x:auto; }.watch-scroll table { width:100%; border-collapse:collapse; text-align:left; min-width:640px; }.watch-scroll th { background:#f6f8f4; font-size:9px; text-transform:uppercase; letter-spacing:.08em; padding:12px; color:#73837e; font-weight:500; }.watch-scroll td { padding:16px 12px; border-bottom:1px solid #eef0ec; font-size:11px; color:#73837e; }.watch-scroll td:first-child { width:40%; }.watch-scroll a { color:#193c34; text-decoration:none; font-weight:500; }.watch-scroll a:hover { text-decoration:underline; }.monitor-pill { display:inline-block; background:#f2f4ee; border-radius:4px; padding:5px 8px; font-size:10px; }\n.source-health { display:flex; flex-wrap:wrap; gap:22px; margin-top:24px; padding:20px 0; }.source-health>div { display:flex; align-items:center; gap:7px; font-size:10px; color:#526b5e; }.source-health>div:first-child { display:grid; margin-right:auto; }.source-health small { display:block; font-size:9px; color:#7b877f; margin-top:5px; }.source-health>div:first-child span { font-size:9px; color:#7b877f; }.source-dot { width:6px; height:6px; border-radius:50%; background:#6b9371; }.source-dot.failed { background:#ba654d; }.source-dot.pending { background:#aaa; }\n.refresh-button { border:1px solid #758e83; border-radius:5px; background:transparent; color:#fff; padding:7px 10px; font-size:11px; }.refresh-button:disabled { opacity:.5; cursor:wait; }.sync-status { color:#c6d5ca; font-size:10px; }\nbutton:focus-visible,a:focus-visible,select:focus-visible { outline:2px solid #c59a47; outline-offset:3px; }\n@media(max-width:950px) { .monitor-metrics { grid-template-columns:repeat(2,1fr); }.monitor-grid { grid-template-columns:1fr; } }\n@media(max-width:560px) { .monitor-title { align-items:flex-start; flex-direction:column; }.monitor-title h1 { font-size:30px; }.monitor-metrics { gap:10px; }.monitor-metrics button { padding:14px; }.monitor-metrics strong { font-size:30px; }.posture-date { display:none; }.monitor-panel { padding:16px; }.live-matrix { grid-template-columns:65px repeat(3,1fr); }.header-actions { flex-wrap:wrap; }.monitor-panel header { flex-wrap:wrap; } }\n.trend-panel { margin-bottom:24px; }\n.trend-range { margin:0; }\n.trend-summary { display:grid; grid-template-columns:repeat(3,1fr); gap:24px; padding:16px 0 22px; border-bottom:1px solid #e4e9e2; }\n.trend-summary strong { display:block; font-size:30px; font-weight:500; color:#31594f; margin-bottom:8px; }\n.trend-summary span { display:block; color:#73837e; font-size:11px; line-height:1.6; }\n.trend-charts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; margin:20px 0; }\n.trend-charts h3 { font-size:12px; font-weight:500; }\n.trend-svg { width:100%; height:auto; display:block; overflow:visible; }\n.trend-svg text { fill:#73837e; font-size:11px; font-family:inherit; }\n.trend-legend { display:flex; gap:12px; flex-wrap:wrap; font-size:10px; color:#73837e; padding-left:7%; }\n.trend-legend span { display:flex; align-items:center; gap:5px; }\n.trend-legend i { height:7px; width:7px; border-radius:50%; }\n.trend-warning { font-size:12px; color:#9d722b; background:#fff4e2; padding:12px; border-radius:5px; }\n.trend-empty { padding:30px 16px; text-align:center; background:#f6f8f4; border-radius:6px; margin:18px 0; }\n.trend-empty strong { font-size:14px; font-weight:500; }.trend-empty p { font-size:12px; color:#73837e; max-width:520px; margin:12px auto 0; line-height:1.7; }\n.trend-details { border-top:1px solid #e4e9e2; padding-top:15px; }.trend-details summary { font-size:11px; cursor:pointer; padding-bottom:12px; }\n@media(max-width:750px) { .trend-charts { grid-template-columns:1fr; }.trend-summary { gap:14px; }.trend-summary strong { font-size:24px; } }\n@media(max-width:420px) { .trend-summary { grid-template-columns:1fr; }.trend-summary>div { display:grid; grid-template-columns:75px 1fr; align-items:center; }.trend-summary strong { margin:0; } }\n.neutral { background:#edf1eb; color:#31594f; }\n\n.review-panel{background:#fff;border:1px solid #dfe5df;border-radius:8px;padding:24px;margin-bottom:24px;color:#193c34}.review-panel h2{font-size:21px;font-weight:500;margin:0 0 10px}.review-panel h3{font-size:16px;font-weight:500}.review-note{font-size:12px;color:#63776e;line-height:1.6}.review-toolbar{display:flex;gap:16px;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap}.review-toolbar button,.review-panel>button,.review-toolbar select{padding:9px 12px;border:1px solid #cad6ce;background:#f7f9f5;border-radius:5px;color:#193c34}.review-toolbar label{font-size:12px}.review-list{list-style:none;padding:0;margin:16px 0}.review-list li{display:flex;gap:16px;justify-content:space-between;align-items:center;padding:13px 0;border-bottom:1px solid #e7ece6;font-size:13px}.review-list a{color:#193c34;text-decoration:none}.review-list a:hover{text-decoration:underline}.review-list small{display:block;color:#64776c;margin-top:6px}.review-list time{white-space:nowrap;font-size:12px}.review-kind{display:inline-block;background:#edf2e9;font-size:10px;padding:3px 6px;border-radius:3px;margin-right:5px}.review-panel details{margin:15px 0}.review-panel summary{cursor:pointer;font-size:13px}.review-grid-scroll{overflow-x:auto}.review-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px;min-width:650px;margin-bottom:24px}.review-day-label{text-align:center;padding:10px;font-size:12px;color:#63776e}.review-day{min-height:120px;text-align:left;background:#fafbf8;border:1px solid #e0e6dc;border-radius:4px;padding:8px;color:#193c34;display:flex;flex-direction:column;gap:6px;overflow:hidden}.review-day.today{border:2px solid #6b896e}.review-day.selected{background:#e7efe1;outline:2px solid #31594f}.review-day span{display:block;font-size:10px;background:#e8eee3;padding:5px;border-radius:3px;overflow-wrap:anywhere}.review-day small{font-size:10px}.review-day strong{font-size:13px}@media(max-width:560px){.review-panel{padding:16px}.review-list li{align-items:flex-start}.review-toolbar{gap:10px}}\n"}</style>
       <main className="hub">
         <header className="site-header">
           <div className="brand"><h1>CONNECT<span>GO</span></h1><p>Governance &amp; Compliance</p></div>
           <div className="header-actions">
+            <span className="sync-status" role="status">{loading ? 'Syncing…' : error ? 'Source interruption' : 'Auto-refresh · 60s'}</span>
+            <button className="refresh-button" onClick={load} disabled={loading}>↻ Refresh</button>
             {synced && <small>Last sync · {synced.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</small>}
             <select value={person} onChange={e=>setPerson(e.target.value)} aria-label="Filter by person">
               <option value="">All people</option>
               {personOptions.map(name=><option key={name} value={name}>{name}</option>)}
             </select>
-            <a className="sign-out" href="/account.html">My account</a>
-            <a className="sign-out" href="/.netlify/functions/auth?action=logout">Sign out</a>
           </div>
         </header>
         <nav className="tab-nav" aria-label="Governance dashboard navigation">
@@ -1031,12 +1386,14 @@ export default function Dashboard() {
         </nav>
         <div className="content">
           <div className="eyebrow">{tabs.find(([id])=>id===tab)[1]} — ConnectGo Limited</div>
-          {error    ? <div className="notice">Could not load Notion data: {error}</div>
-           : loading ? <div className="loading">Loading governance data from Notion…</div>
-           : view}
+          {error && <div className="notice" role="alert">{error}</div>}
+          {loading && !Object.keys(health).length ? <div className="loading">Loading governance data from Notion…</div> : view}
         </div>
         <footer className="site-footer">ConnectGo Ltd · Confidential</footer>
       </main>
     </>
   )
 }
+
+
+
