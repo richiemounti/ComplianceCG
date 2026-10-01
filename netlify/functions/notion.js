@@ -234,7 +234,7 @@ function aggregateTools(pages) {
 
 exports.handler = async event => {
   // Second line of defence behind the edge gate: no valid session, no data.
-  if (!requireUser(event)) return unauthorized()
+  if (!(await requireUser(event))) return unauthorized()
   if (!TOKEN) return { statusCode: 500, body: JSON.stringify({ error: 'NOTION_TOKEN is not configured' }) }
 
   // Task checkbox write-back: POST /.netlify/functions/notion?action=patch&pageId=<id>

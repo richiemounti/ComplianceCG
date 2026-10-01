@@ -1020,6 +1020,7 @@ export default function Dashboard() {
               <option value="">All people</option>
               {personOptions.map(name=><option key={name} value={name}>{name}</option>)}
             </select>
+            <a className="sign-out" href="/account.html">My account</a>
             <a className="sign-out" href="/.netlify/functions/auth?action=logout">Sign out</a>
           </div>
         </header>
